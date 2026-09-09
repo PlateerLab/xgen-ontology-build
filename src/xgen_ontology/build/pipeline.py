@@ -1,7 +1,8 @@
 """OntologyBuilder — orchestrate documents/tables into a clean :class:`Ontology`.
 
 Stages: input split (table vs text) -> deterministic table build + LLM document
-extraction -> merge -> entity resolution -> hierarchy clean -> dedup -> hierarchy
+extraction -> merge -> entity resolution -> hierarchy induction (Hearst patterns +
+head-noun decomposition, zero LLM calls) -> hierarchy clean -> dedup -> hierarchy
 re-clean -> (optional) SCS context profiles. Each stage is independently importable;
 the orchestrator just wires them with injected backends (LLM / morphology / embedder),
 all optional. The CSV path needs no LLM at all.
@@ -15,11 +16,12 @@ from .extract import DocumentExtractor
 from .hierarchy import SCSGenerator, clean_hierarchy
 from .resolve import resolve_entities
 from .tabular import TABLE_EXTENSIONS, analyze_tables, build_from_tables
+from .taxonomy import induce_hierarchy
 
 
 class OntologyBuilder:
     def __init__(self, llm=None, *, morphology=None, embedder=None, domain: str = "",
-                 dedup: bool = True, scs: bool = False,
+                 dedup: bool = True, scs: bool = False, hierarchy: bool = True,
                  chunk: bool = True, chunk_size: int = 1200, chunk_overlap: int = 150):
         self.llm = llm
         self.morphology = morphology
@@ -27,6 +29,7 @@ class OntologyBuilder:
         self.domain = domain
         self.dedup = dedup
         self.scs = scs
+        self.hierarchy = hierarchy
         self.chunk = chunk
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -63,6 +66,18 @@ class OntologyBuilder:
             report.llm_calls += extractor.llm_calls
 
         resolve_entities(instances, relations, data_values)
+
+        if self.hierarchy:
+            prose_texts = [ch.get("chunk_text", "") for chs in text_docs.values() for ch in chs]
+            induced = induce_hierarchy(concepts, prose_texts, instances)
+            total_edges = induced["hearst_edges_added"] + induced["compound_edges_added"]
+            if total_edges:
+                report.notes.append(
+                    f"induced {total_edges} hierarchy edge(s) "
+                    f"({induced['hearst_classes_added']} new class(es) from Hearst patterns)"
+                )
+            report.renamed += induced["renamed"]
+
         clean_hierarchy(concepts)
 
         if self.dedup:

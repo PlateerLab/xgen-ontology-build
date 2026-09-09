@@ -17,15 +17,19 @@ from .ontology import Ontology
 
 def build_from_documents(documents, llm=None, *, morphology=None, embedder=None,
                          domain: str = "", dedup: bool = True, scs: bool = False,
-                         chunk: bool = True, chunk_size: int = 1200, chunk_overlap: int = 150) -> Ontology:
+                         hierarchy: bool = True, chunk: bool = True,
+                         chunk_size: int = 1200, chunk_overlap: int = 150) -> Ontology:
     """Build an ontology from text (and/or table) documents.
 
     ``documents`` = ``{name: text}`` or ``{name: [chunk, ...]}``. Pass an ``llm`` to
     extract from prose; table files (``.csv``/``.tsv``/``.xlsx``) build with no LLM.
-    Raw prose strings are auto-chunked (boundary-aware) unless ``chunk=False``."""
+    Raw prose strings are auto-chunked (boundary-aware) unless ``chunk=False``.
+    ``hierarchy`` (default on, zero LLM calls) induces is-a edges from Hearst
+    patterns in the text and from head-noun decomposition of class names --
+    set ``False`` to keep the flat, headers/LLM-only schema."""
     return OntologyBuilder(llm, morphology=morphology, embedder=embedder, domain=domain,
-                           dedup=dedup, scs=scs, chunk=chunk, chunk_size=chunk_size,
-                           chunk_overlap=chunk_overlap).build(documents)
+                           dedup=dedup, scs=scs, hierarchy=hierarchy, chunk=chunk,
+                           chunk_size=chunk_size, chunk_overlap=chunk_overlap).build(documents)
 
 
 def build_from_text(text: str, *, name: str = "document.txt", llm=None, **kwargs) -> Ontology:
@@ -40,14 +44,15 @@ def build_from_files(paths: list[str], llm=None, **kwargs) -> Ontology:
     return build_from_documents(load_documents(paths), llm=llm, **kwargs)
 
 
-def build_from_csv(tables: dict[str, str], *, embedder=None, dedup: bool = True) -> Ontology:
+def build_from_csv(tables: dict[str, str], *, embedder=None, dedup: bool = True,
+                   hierarchy: bool = True) -> Ontology:
     """Build deterministically from CSV content. ``tables`` maps a (file) name to its
     CSV text; names without a table extension get ``.csv`` appended."""
     docs = {}
     for name, content in tables.items():
         key = name if _has_table_ext(name) else f"{name}.csv"
         docs[key] = content
-    return OntologyBuilder(None, embedder=embedder, dedup=dedup).build(docs)
+    return OntologyBuilder(None, embedder=embedder, dedup=dedup, hierarchy=hierarchy).build(docs)
 
 
 def build_from_csv_files(paths: list[str], *, embedder=None, dedup: bool = True) -> Ontology:

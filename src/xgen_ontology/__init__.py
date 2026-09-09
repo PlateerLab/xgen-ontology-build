@@ -28,6 +28,13 @@ from .build.pipeline import OntologyBuilder
 from .build.quality import review_quality
 from .build.resolve import resolve_entities
 from .build.tabular import analyze_tables, build_from_tables
+from .build.taxonomy import (
+                             extract_hearst_pairs,
+                             hearst_hierarchy,
+                             induce_head_noun_hierarchy,
+                             induce_hierarchy,
+                             prose_only,
+)
 from .facade import (
                      build_from_csv,
                      build_from_csv_files,
@@ -37,6 +44,7 @@ from .facade import (
                      build_from_triples,
                      rows_to_csv,
 )
+from .korean import clean_name, is_sentence_like, normalize_label, strip_list_markers
 from .llm import CallableLLM, EchoLLM
 from .models import (
                      BuildReport,
@@ -57,7 +65,7 @@ from .protocols import LLM, Embedder, GraphSink, GraphStore, Morphology, VectorS
 from .search.oneshot import GraphRAG
 from .text import BM25, safe_uri, tokenize
 
-__version__ = "0.2.0"
+__version__ = "0.5.0"
 
 __all__ = [
     # facade
@@ -72,6 +80,11 @@ __all__ = [
     "cluster_by_cosine", "govern_predicates", "normalize_predicate", "clean_hierarchy",
     "SCSGenerator", "review_quality", "detect_communities", "louvain_communities",
     "to_rdf_triples", "to_turtle", "to_owl_xml",
+    # hierarchy induction (Hearst patterns + head-noun decomposition, zero LLM calls)
+    "induce_hierarchy", "hearst_hierarchy", "extract_hearst_pairs",
+    "induce_head_noun_hierarchy", "prose_only",
+    # Korean text utilities (degrade gracefully with no morphological analyzer)
+    "clean_name", "is_sentence_like", "normalize_label", "strip_list_markers",
     # backends
     "InMemoryGraph", "InMemoryVector", "InMemoryGraphSink", "SparqlGraph", "fuseki",
     # llm

@@ -1,3 +1,31 @@
+# 0.5.0 (2026-09-09)
+
+**Hierarchy induction: is-a edges from text, zero LLM calls.** `build_from_documents` /
+`build_from_csv` gain a `hierarchy: bool = True` flag (`OntologyBuilder(hierarchy=...)`),
+ported from the XGEN production ontology build path and verified byte-for-byte against
+it on a real 87-chunk corpus before merging.
+
+- `build.taxonomy.hearst_hierarchy` — Korean Hearst-pattern extraction ("X, Y 등의 Z" ->
+  Z is-a X, Z is-a Y): noun-run matching around the "등" (NNB) anchor, `min_hyponyms` /
+  `max_coverage` filtering so a hypernym only counts once it generalizes >=2 distinct
+  things without swallowing the corpus. Mints new `Class` objects for hypernyms that
+  weren't already modeled.
+- `build.taxonomy.prose_only` — strips HTML `<table>` blocks and pipe-delimited grid
+  lines before Hearst runs on them. Table rows read as false Hearst hits ("감사패, 상패
+  등의 제작비" -> "제작비" is-a "감사패" is-a "상패", a cost line item misread as a
+  category); on the verification corpus this cut raw pairs 133 -> 27, all genuine.
+- `build.taxonomy.induce_head_noun_hierarchy` — decomposes compound class names by their
+  Korean/English head noun ("상임감사실" -> "감사실"), and folds code-prefixed spelling
+  variants ("NA162000.23 제주목장사업" -> "제주목장사업") into a rename instead of a
+  hierarchy edge. Guards against splitting spaced multi-word names ("한국 마사회" stays
+  intact) and against firing on a leading modifier ("상품목록" is not made a child of
+  "상품" — only suffix matches count as evidence).
+- `korean.py` — `clean_name` / `is_sentence_like` / `normalize_label` / `strip_list_markers`,
+  ported from the production name-cleanup pass; degrades gracefully to word-boundary-only
+  matching with no crash when `kiwipiepy` isn't installed (the `korean` extra).
+
+Set `hierarchy=False` to keep the old flat, headers/LLM-only schema.
+
 # 0.4.0 (2026-09-09)
 
 **License changed to source-available, all rights reserved (Jinsoo Kim).** Repository

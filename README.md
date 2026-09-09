@@ -53,6 +53,7 @@ The pipeline is a sequence of independently-importable, backend-agnostic stages:
 | **tabular** | table → ontology with **no LLM**: table→Class, FK→ObjectProperty (same-name / normalized-name / value-overlap detection), column→DataProperty, dimension rows→instances; large fact/junction tables stay schema-only |
 | **extract** | one LLM call per chunk batch → schema *and* instances, tagged to source chunks; junk (base64/degenerate) filtered first |
 | **resolve** | entity resolution: fold case/whitespace/unicode + similar surface forms, *guarding* dates/ids and number-conflicting names |
+| **taxonomy** | is-a edges from the text itself, **zero LLM calls**: Hearst patterns ("X, Y 등의 Z" → Z is-a X, Z is-a Y) plus head-noun decomposition of compound class names ("상임감사실" → is-a "감사실"). Off with `hierarchy=False` |
 | **govern** | predicate governance: fold surface variants of a relation, anchor to the schema vocabulary |
 | **dedup** | merge synonymous classes/properties/instances — rule keys, LLM synonym groups, and embedding cosine clusters |
 | **hierarchy** | keep only genuine is-a edges ("being linked is not being a subclass"), break cycles, then SCS context profiles with property inheritance |
