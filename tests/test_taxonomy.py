@@ -104,6 +104,7 @@ def test_prose_only_leaves_plain_prose_untouched():
 # ───────────────────────── head-noun decomposition ─────────────────────────
 
 
+@kiwi_required
 def test_induce_head_noun_hierarchy_finds_compound_suffix():
     edges, rename = induce_head_noun_hierarchy(["전사경마사업", "사업", "상임감사실", "감사실"])
     assert ("사업", "전사경마사업") in edges
