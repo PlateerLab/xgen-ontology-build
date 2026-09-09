@@ -4,12 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xgen-ontology"
-version = "0.3.0"
+version = "0.4.0"
 description = "Backend-agnostic ontology / knowledge-graph toolkit — parse + chunk documents (or tables), build a clean KG, then search it with one-shot GraphRAG. Zero infra, any graph DB."
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
-license-files = ["LICENSE"]
+license = { file = "LICENSE" }
 authors = [{ name = "jinsoo96", email = "wlstn010203@gmail.com" }]
 keywords = [
     "ontology", "knowledge-graph", "graphrag", "rag", "sparql",
@@ -24,13 +23,14 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Text Processing :: Linguistic",
+    "License :: Other/Proprietary License",
 ]
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/jinsoo96/xgen-ontology"
-Repository = "https://github.com/jinsoo96/xgen-ontology"
-Changelog = "https://github.com/jinsoo96/xgen-ontology/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/jinsoo96/js-ontology-build"
+Repository = "https://github.com/jinsoo96/js-ontology-build"
+Changelog = "https://github.com/jinsoo96/js-ontology-build/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # Robust OWL / RDF-XML emit + parse (the zero-dep core emits Turtle on its own).

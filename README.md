@@ -160,6 +160,32 @@ examples/  tests/
 - RDF-star / qualified statements (n-ary relations, provenance) in emit
 - reranker / cross-encoder hook for search
 
+## Repository model
+
+[`jinsoo96/js-ontology-build`](https://github.com/jinsoo96/js-ontology-build) is the
+personal source of truth. [`PlateerLab/xgen-ontology-build`](https://github.com/PlateerLab/xgen-ontology-build)
+is the organization mirror and keeps the published Python package name `xgen-ontology`.
+
+Changes land on `js-ontology-build:main` first. The organization repository runs a
+sync workflow every 15 minutes and on manual dispatch. It accepts only a fast-forward
+from the personal source; it never force-pushes or silently overwrites an independent
+organization commit.
+
 ## License
 
-MIT © jinsoo96. See [LICENSE](LICENSE).
+**Source-available, all rights reserved.** Copyright (c) 2026 Jinsoo Kim (jinsoo96).
+
+This is not an open-source license. You may read, clone for personal evaluation, and cite
+this code. You may **not** use it in any product or service, copy it, modify it, redistribute
+it, or build on it without the Owner's prior written permission. The `PlateerLab/xgen-ontology-build`
+mirror and the `xgen-ontology` package on PyPI are redistributions of this repository and carry
+the same terms; installing the package is not a grant of permission.
+
+Releases 0.1.0 through 0.3.0 were published under the MIT License and remain MIT for that
+specific code — this does not apply retroactively. Starting with the release after
+2026-09-09, this repository is source-available only. Full text: [`LICENSE`](LICENSE). To
+request permission, open an issue or email wlstn010203@gmail.com.
+
+소스는 공개돼 있지만 오픈소스가 아닙니다. 열람·인용은 자유이고, 사용·복제·수정·배포·상업적
+이용·파생 작업은 저작권자(김진수)의 사전 서면 허가가 필요합니다. 0.1.0~0.3.0 버전은 그
+버전에 한해 기존 MIT 그대로입니다.

@@ -1,3 +1,22 @@
+# 0.4.0 (2026-09-09)
+
+**License changed to source-available, all rights reserved (Jinsoo Kim).** Repository
+renamed `jinsoo96/xgen-ontology` → `jinsoo96/js-ontology-build` (GitHub keeps the old
+name as a redirect); the published PyPI package name stays `xgen-ontology`. A new
+organization mirror, `PlateerLab/xgen-ontology-build`, replaces the previous
+`PlateerLab/xgen-ontology-build` placeholder and fast-forward-syncs from
+`js-ontology-build:main` every 15 minutes, matching the `js-omnifuse` /
+`PlateerLab/xgen-omnifuse` setup.
+
+Releases 0.1.0-0.3.0 remain under the MIT License for that exact code — this is not
+retroactive. From this release on: reading, personal evaluation and citation are
+allowed; use in a product or service, copying, modification, redistribution,
+derivative works and training ML models on the code require the Owner's prior written
+permission. `pyproject.toml` now declares `license = { file = "LICENSE" }` and the
+`License :: Other/Proprietary License` classifier so the terms surface on PyPI and in
+the built wheel/sdist. See `LICENSE` for the full text and the NOTICE explaining the
+version cutover.
+
 # 0.3.0 (2026-08-26)
 
 Model-agnostic extraction hardening, back-ported from the XGEN production build

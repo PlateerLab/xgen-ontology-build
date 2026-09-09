@@ -1,11 +1,15 @@
 name: Publish
 
+# PyPI publishing is owned by the PlateerLab organization mirror.
+
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 jobs:
   build-and-publish:
+    if: github.repository == 'PlateerLab/xgen-ontology-build'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

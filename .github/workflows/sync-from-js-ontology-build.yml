@@ -1,0 +1,32 @@
+name: Sync from js-ontology-build
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-from-js-ontology-build
+  cancel-in-progress: false
+
+jobs:
+  fast-forward-mirror:
+    if: github.repository == 'PlateerLab/xgen-ontology-build'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the organization mirror
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.SOURCE_SYNC_TOKEN }}
+
+      - name: Fast-forward from the personal source
+        run: |
+          git remote add source https://github.com/jinsoo96/js-ontology-build.git
+          git fetch --no-tags source main
+          git checkout main
+          git merge --ff-only source/main
+          git push origin main

@@ -1,21 +1,136 @@
-MIT License
+js-ontology-build Source-Available License
+===========================================
 
-Copyright (c) 2026 jinsoo96
+Copyright (c) 2026 Jinsoo Kim (GitHub: jinsoo96, wlstn010203@gmail.com).
+All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This license applies to all versions of this Software released after the
+version that introduced it (see NOTICE below for the exact cutover point).
+Earlier releases (0.1.0 through 0.3.0) were published under the MIT License
+and remain MIT for that specific published code; this license does not
+withdraw those grants retroactively. It governs this repository and every
+release from this point forward.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+This is NOT an open-source license. The source code of this Software (the
+"Software") is made publicly visible so that it can be read, evaluated and
+cited. Publication of the source, and its availability on GitHub or on the
+Python Package Index, does NOT grant anyone permission to use it.
 
+
+1. Ownership
+------------
+The Software, including all source code, documentation, benchmark artifacts,
+evaluation data authored for this project, and the names "js-ontology-build",
+"xgen-ontology" and "xgen-ontology-build", is the sole property of the
+copyright holder named above (the "Owner"). The Owner is the single source of
+truth for this Software: the repository jinsoo96/js-ontology-build is the
+origin, and every mirror or redistribution of it is derived from that origin
+and remains subject to this license.
+
+
+2. What you MAY do without asking
+---------------------------------
+Subject to keeping this license file and all copyright notices intact, you
+may:
+
+  a. read, browse and study the source code;
+  b. clone or download it to your own machine for personal, non-commercial
+     evaluation and for the purpose of reviewing or citing the work;
+  c. quote short excerpts of the source or documentation for commentary,
+     review, teaching or academic citation, with attribution to the Owner
+     and a link to https://github.com/jinsoo96/js-ontology-build;
+  d. use releases published under the MIT License (versions 0.1.0-0.3.0)
+     under the terms of that MIT License, which remains in effect for that
+     specific code as noted above.
+
+
+3. What you may NOT do without prior written permission
+--------------------------------------------------------
+Except as expressly allowed in Section 2, you may NOT, in whole or in part:
+
+  a. use the Software in any product, service, internal tool, pipeline or
+     workflow, whether commercial, non-commercial, academic or governmental;
+  b. copy, reproduce, modify, translate, adapt or create derivative works;
+  c. merge it into, or use it as a component of, any other software;
+  d. publish, distribute, sublicense, rent, lease, sell or otherwise make it
+     available to third parties, including by re-uploading it to any package
+     index, model hub or code host;
+  e. use the Software, its documentation or its benchmark results to train,
+     fine-tune, evaluate or prompt any machine-learning model or coding
+     assistant that produces derivative code;
+  f. remove, obscure or alter this license, the copyright notice, or any
+     attribution to the Owner;
+  g. use the names "js-ontology-build", "xgen-ontology", "xgen-ontology-build",
+     or the Owner's name, to endorse or promote products derived from or
+     related to the Software.
+
+"Written permission" means an explicit, dated grant from the Owner
+identifying the licensee and the permitted use. Permission may be limited in
+scope and duration and may be revoked by the Owner. The absence of a reply
+is not permission.
+
+
+4. Mirrors and package distributions
+------------------------------------
+The organization mirror at https://github.com/PlateerLab/xgen-ontology-build
+and the Python package published as "xgen-ontology" are automated
+redistributions of this repository made by, or on behalf of, the Owner for
+the Owner's own purposes. They carry this same license from the version this
+license takes effect on. Installing the package with a package manager is a
+technical act and does not constitute permission under Section 3. Any grant
+of rights to an organization must be made in writing by the Owner personally
+and does not follow from the existence of a mirror, from the Owner's
+employment, or from the package being installable.
+
+
+5. Contributions
+----------------
+By submitting any contribution (code, documentation, benchmark data, issue
+text or otherwise) to this Software, you agree that the contribution becomes
+the property of the Owner, and you assign to the Owner all copyright and
+related rights in it to the fullest extent permitted by law. Where such
+assignment is not legally possible, you grant the Owner an exclusive,
+perpetual, irrevocable, worldwide, royalty-free license to use the
+contribution for any purpose, including relicensing. You represent that you
+have the right to make this assignment.
+
+
+6. Termination
+--------------
+Any breach of Section 3 terminates whatever permission you had under
+Section 2 immediately and automatically. Upon termination you must destroy
+all copies of the Software in your possession.
+
+
+7. No warranty
+--------------
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+FITNESS FOR A PARTICULAR PURPOSE AND NON-INFRINGEMENT. IN NO EVENT SHALL THE
+OWNER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+8. Governing law
+----------------
+This license is governed by the laws of the Republic of Korea. Any dispute
+arising from it shall be subject to the exclusive jurisdiction of the courts
+of Seoul, Republic of Korea.
+
+
+9. Requesting permission
+------------------------
+To request permission for any use not allowed by Section 2, contact the
+Owner at wlstn010203@gmail.com or open an issue at
+https://github.com/jinsoo96/js-ontology-build/issues describing the intended
+use.
+
+
+NOTICE — license history
+-------------------------
+Releases 0.1.0, 0.2.0 and 0.3.0 of this project (published as "xgen-ontology"
+on PyPI) were released under the MIT License. Starting with the first release
+published after 2026-09-09, this Source-Available License applies instead.
+The MIT grant for the three earlier releases is not revoked; this notice
+exists so downstream users can tell which terms cover which version.
