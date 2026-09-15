@@ -1,8 +1,14 @@
 name: Sync from xgen-ontology-build
 
 # jinsoo96/js-ontology-build is a mirror of PlateerLab/xgen-ontology-build. This job runs
-# only on the mirror and fast-forwards it from the origin. It pushes with the repository's
-# own GITHUB_TOKEN, so no personal access token is stored anywhere and nothing expires.
+# only on the mirror and fast-forwards it from the origin.
+#
+# The push uses the SYNC_TOKEN secret (a personal access token with the `repo` and
+# `workflow` scopes) when the mirror has one, and the repository's own GITHUB_TOKEN
+# otherwise. GITHUB_TOKEN can never push a commit that touches .github/workflows/*:
+# GitHub rejects it with "refusing to allow a GitHub App to create or update workflow".
+# The origin does change its CI from time to time, so without SYNC_TOKEN the mirror
+# silently stops at the first such commit.
 
 on:
   schedule:
@@ -25,6 +31,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
 
       - name: Fast-forward from the organization origin
         run: |
