@@ -1,7 +1,6 @@
 """xgen-ontology — backend-agnostic ontology / knowledge-graph toolkit.
 
-Build a clean knowledge graph from documents or tables, then search it with
-one-shot GraphRAG. Zero infra (pure-Python in-memory), zero lock-in (any SPARQL
+Build a provenance-bearing knowledge graph from documents or tables. Zero infra (pure-Python in-memory), zero lock-in (any SPARQL
 store), zero hard deps in the core.
 
 Quickstart — deterministic table -> ontology, no LLM, no infra (documents build
@@ -13,7 +12,6 @@ the same way: ``build_from_documents({"policy.md": text})`` needs no LLM either)
         "colors":   "color_id,name\\n10,Red\\n20,Blue",
     })
     print(onto.stats())
-    print(onto.search("what color is Widget").answer)   # EchoLLM by default
     onto.to_turtle()                                      # serialize to RDF
 """
 from .backends.memory import InMemoryGraph, InMemoryGraphSink, InMemoryVector
@@ -70,6 +68,7 @@ from .facade import (
                                   build_from_triples,
                                   rows_to_csv,
 )
+from .knowledge_build import build_knowledge, export_knowledge
 from .korean import clean_name, is_sentence_like, normalize_label, strip_list_markers
 from .llm import CallableLLM, EchoLLM
 from .models import (
@@ -88,12 +87,13 @@ from .models import (
 )
 from .ontology import Ontology
 from .protocols import LLM, Embedder, GraphSink, GraphStore, Morphology, VectorStore
-from .search.oneshot import GraphRAG
 from .text import BM25, safe_uri, tokenize
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 __all__ = [
+    # portable knowledge exchange
+    "build_knowledge", "export_knowledge",
     # facade
     "build_from_documents", "build_from_text", "build_from_files", "build_from_csv",
     "build_from_csv_files", "build_from_triples", "rows_to_csv", "OntologyBuilder", "Ontology",
@@ -129,3 +129,16 @@ __all__ = [
     "BM25", "tokenize", "safe_uri",
     "__version__",
 ]
+
+
+def __getattr__(name):
+    # Preserve old imports while keeping the independent build path free of the
+    # retired search engine. New retrieval integrations use xgen-omnifuse.
+    if name == "GraphRAG":
+        import warnings
+
+        from .search.oneshot import GraphRAG
+        warnings.warn("xgen_ontology.GraphRAG is legacy; use xgen-omnifuse for retrieval",
+                      DeprecationWarning, stacklevel=2)
+        return GraphRAG
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

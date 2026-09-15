@@ -1,3 +1,14 @@
+# 0.9.0 (2026-09-15)
+
+- Add `build_knowledge` and `export_knowledge` using the current production build pipeline with explicit immutable source identities.
+- Preserve directory hierarchy, embedding profiles/vectors, chunk revisions and source locators through graph construction.
+- Export typed facts with resolvable evidence, corpus-qualified entity IDs, schema and build diagnostics through `knowledge/v1`.
+- Add checksummed atomic JSON exchange, structural schema, semantic validation and digest-pinned standalone consumer records.
+- Use complete replacement builds for source modification/deletion; keep publication and job transactions in the host.
+- Require an LLM for explicitly requested enrichment on the new API and propagate cooperative cancellation between stages.
+- Lazy-load/deprecate legacy search entry points while preserving their compatibility.
+- Add independent build/import tests and a producer fixture for retrieval conformance.
+
 # 0.8.0 (2026-09-15)
 
 - **`backends.postgres.PgGraph`** (new) -- the production graph tables
