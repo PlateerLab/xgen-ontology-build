@@ -1,3 +1,12 @@
+# Unreleased
+
+**Repository model reversed.** `PlateerLab/xgen-ontology-build` is now the origin and
+publishes the package; `jinsoo96/js-ontology-build` is a read-only mirror that
+fast-forwards from it with its own `GITHUB_TOKEN` (no personal credential, nothing to
+expire). LICENSE gains §4, a written grant letting PlateerLab organization members use,
+modify, build and ship the Software as part of Plateer products. Not open source;
+copyright unchanged; the 0.1.0-0.3.0 MIT carve-out unchanged.
+
 # 0.5.0 (2026-09-09)
 
 **Hierarchy induction: is-a edges from text, zero LLM calls.** `build_from_documents` /
