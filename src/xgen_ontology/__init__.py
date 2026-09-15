@@ -29,71 +29,75 @@ from .build.deterministic import (
                                   is_common_word,
                                   is_value,
 )
+from .build.dictionary import Term, TermDictionary
 from .build.emit import to_owl_xml, to_rdf_triples, to_turtle
 from .build.extract import DocumentExtractor, extraction_schema
+from .build.finalize import normalize_graph
 from .build.govern import (
-                           govern_predicates,
-                           merge_predicates,
-                           normalize_predicate,
-                           strip_argument_noun,
-                           vote_relation_direction,
+                                  govern_predicates,
+                                  merge_predicates,
+                                  normalize_predicate,
+                                  strip_argument_noun,
+                                  vote_relation_direction,
 )
 from .build.hierarchy import (
-                              SCSGenerator,
-                              clean_hierarchy,
-                              fix_self_typed_instances,
-                              materialize_property_inheritance,
+                                  SCSGenerator,
+                                  clean_hierarchy,
+                                  fix_self_typed_instances,
+                                  materialize_property_inheritance,
 )
 from .build.parse import extract_text, html_to_text, load_documents
-from .build.pipeline import OntologyBuilder
+from .build.pipeline import OntologyBuilder, unbuilt_chunks
 from .build.quality import review_quality
 from .build.resolve import resolve_entities
 from .build.tabular import analyze_tables, build_from_tables
 from .build.taxonomy import (
-                             extract_hearst_pairs,
-                             fold_name_fragments,
-                             hearst_hierarchy,
-                             induce_head_noun_hierarchy,
-                             induce_hierarchy,
-                             prose_only,
-                             prune_common_words,
+                                  extract_hearst_pairs,
+                                  fold_name_fragments,
+                                  hearst_hierarchy,
+                                  induce_head_noun_hierarchy,
+                                  induce_hierarchy,
+                                  prose_only,
+                                  prune_common_words,
 )
+from .build.translate import clean_korean_name, translate_names
 from .facade import (
-                     build_from_csv,
-                     build_from_csv_files,
-                     build_from_documents,
-                     build_from_files,
-                     build_from_text,
-                     build_from_triples,
-                     rows_to_csv,
+                                  build_from_csv,
+                                  build_from_csv_files,
+                                  build_from_documents,
+                                  build_from_files,
+                                  build_from_text,
+                                  build_from_triples,
+                                  rows_to_csv,
 )
 from .korean import clean_name, is_sentence_like, normalize_label, strip_list_markers
 from .llm import CallableLLM, EchoLLM
 from .models import (
-                     BuildReport,
-                     Chunk,
-                     Class,
-                     Concepts,
-                     DataProperty,
-                     DataValue,
-                     Instance,
-                     Node,
-                     ObjectProperty,
-                     RDFTriple,
-                     Relation,
-                     SearchResult,
+                                  BuildReport,
+                                  Chunk,
+                                  Class,
+                                  Concepts,
+                                  DataProperty,
+                                  DataValue,
+                                  Instance,
+                                  Node,
+                                  ObjectProperty,
+                                  RDFTriple,
+                                  Relation,
+                                  SearchResult,
 )
 from .ontology import Ontology
 from .protocols import LLM, Embedder, GraphSink, GraphStore, Morphology, VectorStore
 from .search.oneshot import GraphRAG
 from .text import BM25, safe_uri, tokenize
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     # facade
     "build_from_documents", "build_from_text", "build_from_files", "build_from_csv",
     "build_from_csv_files", "build_from_triples", "rows_to_csv", "OntologyBuilder", "Ontology",
+    "unbuilt_chunks",
     # search
     "GraphRAG",
     # ingest
@@ -105,7 +109,8 @@ __all__ = [
     "shorten_entity_name", "govern_predicates", "normalize_predicate", "strip_argument_noun",
     "vote_relation_direction", "merge_predicates", "clean_hierarchy", "fix_self_typed_instances",
     "materialize_property_inheritance", "SCSGenerator", "review_quality", "detect_communities",
-    "louvain_communities", "to_rdf_triples", "to_turtle", "to_owl_xml",
+    "louvain_communities", "normalize_graph", "translate_names", "clean_korean_name",
+    "TermDictionary", "Term", "to_rdf_triples", "to_turtle", "to_owl_xml",
     # hierarchy induction (Hearst patterns + name structure, zero LLM calls)
     "induce_hierarchy", "hearst_hierarchy", "extract_hearst_pairs",
     "induce_head_noun_hierarchy", "fold_name_fragments", "prune_common_words", "prose_only",

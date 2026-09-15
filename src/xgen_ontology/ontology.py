@@ -32,6 +32,7 @@ class Ontology:
     relations: list[Relation] = field(default_factory=list)
     data_values: list[DataValue] = field(default_factory=list)
     chunks: list[Chunk] = field(default_factory=list)
+    enriched_chunks: list[str] = field(default_factory=list)   # chunk ids the LLM relation pass covered
     translations: dict[str, str] = field(default_factory=dict)
     scs_profiles: list[dict] = field(default_factory=list)
     report: BuildReport = field(default_factory=BuildReport)
@@ -84,6 +85,20 @@ class Ontology:
         engine = GraphRAG(self.graph(), self.vector(embedder=embedder), llm, **kwargs)
         return engine.search(question)
 
+    # ── identifiers ──
+
+    def translate(self, llm, *, batch_size: int = 50) -> dict[str, str]:
+        """Give every class and property an English IRI local name via ``llm`` (cached in ``translations``).
+
+        Only names not yet translated are sent, so calling it after an
+        :meth:`~xgen_ontology.OntologyBuilder.extend` costs one batch per 50 new names.
+        """
+        from .build.translate import collect_terms, translate_names
+
+        self.translations = translate_names(collect_terms(self.concepts), llm,
+                                            cache=self.translations, batch_size=batch_size)
+        return self.translations
+
     # ── emit ──
 
     def to_rdf_triples(self) -> list[RDFTriple]:
@@ -106,6 +121,17 @@ class Ontology:
 
     def communities(self) -> list[dict]:
         return detect_communities(self.instances, self.relations)
+
+    def community_of(self) -> dict[str, int]:
+        """Instance name -> Louvain community id over the instance-relation graph (largest community is 0)."""
+        from .build.community import louvain_communities
+
+        names = {i.name for i in self.instances if i.name}
+        edges = [(r.subject, r.object) for r in self.relations
+                 if r.predicate_type != "DatatypeProperty" and r.subject in names
+                 and r.object in names and r.subject != r.object]
+        nodes = sorted({n for e in edges for n in e})
+        return louvain_communities(nodes, edges) if edges else {}
 
     def stats(self) -> dict:
         return {

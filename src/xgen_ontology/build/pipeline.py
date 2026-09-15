@@ -14,10 +14,13 @@ database plumbing:
    -> name-fragment folding -> common-word pruning -> hierarchy from name
    structure (classes *and* instances) -> vector dedup (if an embedder is given)
    -> self-typed repair -> hierarchy clean -> property inheritance
+   -> graph normalization (the store-loading rules)
 4. optional SCS profiles, then a quality review recorded on the report
 
-Each stage is independently importable; the orchestrator only wires them with
-injected backends (LLM / morphology / embedder), all optional.
+:meth:`OntologyBuilder.extend` runs the same pipeline incrementally over the
+chunks an existing ontology has not seen. Each stage is independently importable;
+the orchestrator only wires them with injected backends (LLM / morphology /
+embedder / term dictionary), all optional.
 """
 from __future__ import annotations
 
@@ -25,7 +28,9 @@ from ..models import BuildReport, Chunk, Concepts, DataValue, Instance, Relation
 from .chunk import chunk_document
 from .dedup import Deduplicator
 from .deterministic import DEFAULT_COMMON_WORD_RANK, extract_deterministic
+from .dictionary import TermDictionary
 from .extract import DocumentExtractor
+from .finalize import normalize_graph
 from .govern import merge_predicates
 from .hierarchy import (
     SCSGenerator,
@@ -48,7 +53,7 @@ class OntologyBuilder:
                  chunk_overlap: int = 150, header_patterns=(), max_coverage: float = 0.30,
                  min_freq: int = 1, common_word_rank: int = DEFAULT_COMMON_WORD_RANK,
                  related_predicate: str | None = DEFAULT_RELATED_PREDICATE,
-                 unit_scales: dict | None = None):
+                 unit_scales: dict | None = None, dictionary: TermDictionary | None = None):
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
         self.llm = llm
@@ -69,24 +74,57 @@ class OntologyBuilder:
         self.common_word_rank = common_word_rank
         self.related_predicate = related_predicate
         self.unit_scales = unit_scales
+        self.dictionary = dictionary
+
+    # ── entry points ──
 
     def build(self, documents: dict[str, list[dict]]):
+        """Build from scratch."""
         from ..ontology import Ontology  # local import (Ontology imports build.*)
 
-        documents = _normalize_documents(documents, chunk=self.chunk,
-                                         size=self.chunk_size, overlap=self.chunk_overlap)
-        table_docs = {n: c for n, c in documents.items() if _ext(n) in TABLE_EXTENSIONS}
-        text_docs = {n: c for n, c in documents.items() if _ext(n) not in TABLE_EXTENSIONS}
+        return self._run(Ontology(), _normalize_documents(documents, chunk=self.chunk,
+                                                          size=self.chunk_size, overlap=self.chunk_overlap))
 
-        concepts = Concepts()
-        instances: list[Instance] = []
-        relations: list[Relation] = []
-        data_values: list[DataValue] = []
-        report = BuildReport()
+    def extend(self, ontology, documents: dict[str, list[dict]], *, rebuild: bool = False):
+        """Incremental build: extract only the chunks ``ontology`` has not seen, then re-run the post-build.
+
+        Chunks are recognized by id, so pass the same ids the original build saw
+        (raw strings get deterministic ``name#index`` ids). The discriminativeness
+        denominator is the whole corpus (old chunks + new). Hierarchy induction is
+        restricted to the names this extension introduced and the names they can
+        touch, the way the production store does it. In ``enrich`` mode the LLM
+        pass covers only chunks whose relations were not asked for yet.
+        ``rebuild=True`` treats every chunk as new. Returns the same ``ontology``.
+        """
+        documents = _normalize_documents(documents, chunk=self.chunk, size=self.chunk_size,
+                                         overlap=self.chunk_overlap)
+        if rebuild:
+            ontology.chunks = [c for c in ontology.chunks
+                               if c.id not in {ch["chunk_id"] for chs in documents.values() for ch in chs}]
+            ontology.enriched_chunks = [c for c in ontology.enriched_chunks
+                                        if c not in {ch["chunk_id"] for chs in documents.values() for ch in chs}]
+        return self._run(ontology, documents, incremental=True)
+
+    # ── the pipeline ──
+
+    def _run(self, onto, documents: dict[str, list[dict]], *, incremental: bool = False):
+        concepts, instances, relations, data_values = (onto.concepts, onto.instances,
+                                                       onto.relations, onto.data_values)
+        report = onto.report if incremental else BuildReport()
         mode = self.mode if (self.llm is not None or self.mode == "basic") else "basic"
         if mode != self.mode:
             report.notes.append(f"no LLM given: mode {self.mode!r} ran as 'basic'")
         report.mode = mode
+
+        known = {c.id for c in onto.chunks}
+        new_docs = {n: [ch for ch in chs if ch["chunk_id"] not in known] for n, chs in documents.items()}
+        new_docs = {n: chs for n, chs in new_docs.items() if chs}
+        corpus_total = len(known | {ch["chunk_id"] for chs in documents.values() for ch in chs})
+        table_docs = {n: c for n, c in new_docs.items() if _ext(n) in TABLE_EXTENSIONS}
+        text_docs = {n: c for n, c in new_docs.items() if _ext(n) not in TABLE_EXTENSIONS}
+        before = {c.name for c in concepts.classes} | {i.name for i in instances}
+        if incremental and not new_docs and mode != "enrich":
+            report.notes.append("no new chunks: nothing to extract")
 
         protected: set[str] = set()   # table-built names: deterministic identities, never renamed away
         if table_docs:
@@ -98,37 +136,45 @@ class OntologyBuilder:
             data_values += dv
             protected = {cl.name for cl in c.classes if cl.name} | {x.name for x in i if x.name}
 
-        if text_docs:
-            if mode in ("basic", "enrich"):
-                c, i, r, dv = extract_deterministic(
-                    text_docs, min_freq=self.min_freq, max_coverage=self.max_coverage,
-                    header_patterns=self.header_patterns, common_word_rank=self.common_word_rank,
-                    hearst=self.hierarchy)
-                _merge(concepts, c)
-                instances += i
-                relations += r
-                data_values += dv
-            if mode == "enrich":
+        if text_docs and mode in ("basic", "enrich"):
+            c, i, r, dv = extract_deterministic(
+                text_docs, min_freq=self.min_freq, max_coverage=self.max_coverage,
+                corpus_chunks=corpus_total, header_patterns=self.header_patterns,
+                common_word_rank=self.common_word_rank, hearst=self.hierarchy)
+            _merge(concepts, c)
+            instances += i
+            relations += r
+            data_values += dv
+        if mode == "enrich":
+            # the enrich baseline is "chunks whose relations were asked for", not "chunks built"
+            done = set(onto.enriched_chunks)
+            todo = {n: [ch for ch in chs if ch["chunk_id"] not in done] for n, chs in documents.items()
+                    if _ext(n) not in TABLE_EXTENSIONS}
+            todo = {n: chs for n, chs in todo.items() if chs}
+            if todo:
                 extractor = DocumentExtractor(self.llm, domain=self.domain,
                                               header_patterns=self.header_patterns)
                 known_preds = list(dict.fromkeys(
                     [r.predicate for r in relations if r.predicate]
                     + [op.name for op in concepts.object_properties if op.name]))
                 relations += extractor.extract_relations(
-                    text_docs, known_entities=list(dict.fromkeys(i.name for i in instances if i.name)),
+                    todo, known_entities=list(dict.fromkeys(i.name for i in instances if i.name)),
                     known_predicates=known_preds)
                 report.llm_calls += extractor.llm_calls
-            if mode == "llm":
-                extractor = DocumentExtractor(self.llm, domain=self.domain,
-                                              header_patterns=self.header_patterns,
-                                              unit_scales=self.unit_scales)
-                c, i, r, dv = extractor.extract(text_docs)
-                _merge(concepts, c)
-                instances += i
-                relations += r
-                data_values += dv
-                report.llm_calls += extractor.llm_calls
+                onto.enriched_chunks = sorted(done | {ch["chunk_id"] for chs in todo.values() for ch in chs})
+        if text_docs and mode == "llm":
+            extractor = DocumentExtractor(self.llm, domain=self.domain,
+                                          header_patterns=self.header_patterns,
+                                          unit_scales=self.unit_scales)
+            c, i, r, dv = extractor.extract(text_docs)
+            _merge(concepts, c)
+            instances += i
+            relations += r
+            data_values += dv
+            report.llm_calls += extractor.llm_calls
 
+        if self.dictionary is not None:
+            report.renamed += self.dictionary.apply_to_build(concepts, instances, relations, data_values)
         if self.resolve:
             resolve_entities(instances, relations, data_values)
 
@@ -136,7 +182,7 @@ class OntologyBuilder:
         if self.dedup:
             # Key merge is for extracted names; a table row's label is its identity.
             rename = {o: n for o, n in deduper._normalize_instances(instances).items()
-                      if o not in protected} if text_docs else {}
+                      if o not in protected} if (text_docs or incremental) else {}
             if rename:
                 Deduplicator._apply_instance(rename, instances, relations, data_values)
                 report.renamed += len(rename)
@@ -147,9 +193,12 @@ class OntologyBuilder:
         if self.hierarchy:
             prose_texts = ([ch.get("chunk_text", "") for chs in text_docs.values() for ch in chs]
                            if mode == "llm" else None)   # basic/enrich ran Hearst during extraction
+            new_names = None
+            if incremental:
+                new_names = ({c.name for c in concepts.classes} | {i.name for i in instances}) - before
             induced = induce_hierarchy(concepts, prose_texts, instances, relations,
                                        related_predicate=self.related_predicate,
-                                       header_patterns=self.header_patterns)
+                                       header_patterns=self.header_patterns, new_names=new_names)
             edges = induced["hearst_edges_added"] + induced["compound_edges_added"]
             if edges or induced["typed"] or induced["promoted"]:
                 report.notes.append(
@@ -174,14 +223,17 @@ class OntologyBuilder:
         fix_self_typed_instances(instances, concepts)
         clean_hierarchy(concepts)
         materialize_property_inheritance(concepts)
+        report.normalized = normalize_graph(
+            concepts, instances, relations, data_values,
+            structural_predicates=(self.related_predicate,) if self.related_predicate else ())
+        clean_hierarchy(concepts)
 
-        scs_profiles: list[dict] = []
         if self.scs:
             gen = SCSGenerator(self.llm)
-            scs_profiles = gen.generate_profiles(concepts)
+            onto.scs_profiles = gen.generate_profiles(concepts)
             report.llm_calls += gen.llm_calls
 
-        chunks = _build_chunks(documents, instances)
+        onto.chunks = _extend_chunks(onto.chunks, documents, instances)
 
         report.classes = len(concepts.classes)
         report.object_properties = len(concepts.object_properties)
@@ -189,10 +241,18 @@ class OntologyBuilder:
         report.instances = len({i.name for i in instances if i.name})
         report.relations = len(relations)
         report.data_values = len(data_values)
+        report.chunks = len(onto.chunks)
         report.quality = review_quality(concepts, instances, relations, data_values)
+        onto.report = report
+        return onto
 
-        return Ontology(concepts=concepts, instances=instances, relations=relations,
-                        data_values=data_values, chunks=chunks, scs_profiles=scs_profiles, report=report)
+
+def unbuilt_chunks(ontology, documents: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """The chunks of ``documents`` that ``ontology`` has not built yet (by chunk id), per document."""
+    docs = _normalize_documents(documents)
+    known = {c.id for c in ontology.chunks}
+    out = {n: [ch for ch in chs if ch["chunk_id"] not in known] for n, chs in docs.items()}
+    return {n: chs for n, chs in out.items() if chs}
 
 
 def _linked_names(concepts: Concepts, instances: list[Instance], relations: list[Relation]) -> set[str]:
@@ -316,12 +376,17 @@ def _merge(into: Concepts, new: Concepts) -> None:
             h.add(edge)
 
 
-def _build_chunks(documents: dict[str, list[dict]], instances: list[Instance]) -> list[Chunk]:
-    chunks: dict[str, Chunk] = {}
+def _extend_chunks(existing: list[Chunk], documents: dict[str, list[dict]],
+                   instances: list[Instance]) -> list[Chunk]:
+    """The chunk list with ``documents`` added, entity mentions recomputed from ``instances``."""
+    chunks: dict[str, Chunk] = {c.id: c for c in existing}
     for _name, chs in documents.items():
         for ch in chs:
             cid = ch["chunk_id"]
-            chunks[cid] = Chunk(id=cid, text=ch.get("chunk_text", ""))
+            if cid not in chunks:
+                chunks[cid] = Chunk(id=cid, text=ch.get("chunk_text", ""))
+    for c in chunks.values():
+        c.entities = []
     for inst in instances:
         for cid in inst.source_chunks or []:
             if cid in chunks and inst.name not in chunks[cid].entities:

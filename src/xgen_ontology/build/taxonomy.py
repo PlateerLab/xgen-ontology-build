@@ -330,8 +330,29 @@ def prune_common_words(
             and is_common_word(n, rank_max)}
 
 
+def _new_name_filter(new_labels) -> tuple[dict[int, set], set, set]:
+    """Lookup tables built from the names an incremental build introduced."""
+    by_len: dict[int, set] = {}
+    tail2: set = set()
+    for lb in new_labels:
+        if len(lb) >= _HEAD_MIN_TAIL:
+            by_len.setdefault(len(lb), set()).add(lb)
+            tail2.add(lb[-_HEAD_MIN_TAIL:])
+    return by_len, tail2, set(new_labels)
+
+
+def _touched_by_new(label: str, by_len: dict[int, set], tail2: set, words: set) -> bool:
+    """Can a new name change this old name's hierarchy or neighbours (new name is its tail or its first word)?"""
+    if label[-_HEAD_MIN_TAIL:] in tail2:
+        for ln, group in by_len.items():
+            if ln < len(label) and len(label) - ln >= _HEAD_MIN_MOD and label[-ln:] in group:
+                return True
+    parts = label.split()
+    return len(parts) > 1 and parts[0] in words
+
+
 def induce_head_noun_hierarchy(
-    labels: list[str], *, class_labels: set[str] | None = None,
+    labels: list[str], *, class_labels: set[str] | None = None, only: set[str] | None = None,
 ) -> tuple[list[tuple[str, str]], dict[str, str], list[tuple[str, str]]]:
     """Names -> ``(subclass edges, sameAs renames, related pairs)``. Zero LLM calls.
 
@@ -344,8 +365,10 @@ def induce_head_noun_hierarchy(
     word that is itself a known name is a same-topic neighbour ("related").
 
     ``class_labels`` orders the lookup so a class wins over an instance with the
-    same spelling. Returns ``edges`` as ``[(parent, child)]``, ``rename`` as
-    ``{spelling: canonical}``, ``related`` as ``[(name, neighbour)]``.
+    same spelling. ``only`` (an incremental build's new names) restricts the scan
+    to those names plus the existing names they can touch. Returns ``edges`` as
+    ``[(parent, child)]``, ``rename`` as ``{spelling: canonical}``, ``related`` as
+    ``[(name, neighbour)]``.
     """
     class_labels = class_labels or set()
     uniq = [lb for lb in dict.fromkeys(labels) if lb]
@@ -358,7 +381,11 @@ def induce_head_noun_hierarchy(
     best: dict[str, str] = {}
     same: dict[str, str] = {}
     related: list[tuple[str, str]] = []
+    by_len, tail2, new_words = _new_name_filter([lb for lb in uniq if lb in only]) if only is not None else ({}, set(), set())
     for cl in uniq:
+        if only is not None and cl not in only:
+            if not (by_len and _touched_by_new(cl, by_len, tail2, new_words)):
+                continue
         heads, tails = _boundary_parts(cl, use_morph)
         for tail in tails:
             if tail not in by_label or tail == cl or len(tail) < _HEAD_MIN_TAIL or not cl.endswith(tail):
@@ -391,6 +418,7 @@ def induce_hierarchy(
     max_coverage: float = _DEFAULT_MAX_COVERAGE,
     related_predicate: str | None = DEFAULT_RELATED_PREDICATE,
     header_patterns=(),
+    new_names: set[str] | None = None,
 ) -> dict[str, int]:
     """Induce hierarchy in place: Hearst patterns over ``texts``, then name structure over classes *and* instances.
 
@@ -399,7 +427,9 @@ def induce_hierarchy(
     a class child gets a ``subClassOf`` edge; an instance child is typed by its
     head class (an extra ``rdf:type`` when it already has one); a code-prefixed
     spelling is folded into its canonical name; a leading-word neighbour becomes a
-    ``related_predicate`` relation (``None`` disables that).
+    ``related_predicate`` relation (``None`` disables that). ``new_names`` (an
+    incremental build) limits the name-structure pass to those names and the
+    existing names they can touch.
 
     Returns ``{"hearst_classes_added", "hearst_edges_added", "compound_edges_added",
     "promoted", "typed", "renamed", "related_added"}``.
@@ -429,7 +459,7 @@ def induce_hierarchy(
     class_labels = {c.name for c in concepts.classes if c.name}
     inst_labels = [i.name for i in instances if i.name]
     edges, rename, related = induce_head_noun_hierarchy(
-        [*class_labels, *inst_labels], class_labels=class_labels)
+        [*class_labels, *inst_labels], class_labels=class_labels, only=new_names)
 
     # A head is a concept: an instance used as a head becomes a class (its chunks come along).
     parents = {p for p, _ in edges}

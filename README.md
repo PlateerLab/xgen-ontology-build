@@ -63,10 +63,38 @@ The pipeline is a sequence of independently-importable, backend-agnostic stages:
 | **govern** | predicate governance: strip a subject/object noun glued into the predicate, fold surface variants, anchor to the schema and to predicates already in use; vote relation direction by (subject type, object type) majority; merge predicates that share a stem or whose extension is contained in another's |
 | **dedup** | merge synonymous names — content-morpheme keys for instances (shortest spelling wins), (domain, range, key) groups for properties, LLM synonym groups (`mode="enrich"` only), embedding cosine clusters when an embedder is given |
 | **hierarchy** | keep only genuine is-a edges ("being linked is not being a subclass"), break cycles, repair instances typed by a class of their own name, materialize inherited properties onto subclasses; optional SCS context profiles |
+| **normalize** | the store-loading rules: a class must look like a class name; a relation named with graph vocabulary (`type`, `instanceOf`, `subClassOf`, `sameAs`) is a typing statement; a relation whose predicate is a declared datatype property or whose object is a value is an attribute; a subject that is a value is dropped; anything referenced is declared (no dangling endpoints) |
 | **quality** | a graph-reviewer score: completeness · integrity · grounding · shape, recorded on `onto.report.quality` |
 | **resolve** | (off by default) fuzzy entity resolution: fold similar surface forms, *guarding* dates/ids and number-conflicting names |
 | **community** | Louvain modularity clustering (pure Python) |
 | **emit** | Turtle (zero-dep) or OWL/RDF-XML (rdflib) |
+
+### Keep building: incremental, dictionary, identifiers
+
+```python
+from xgen_ontology import OntologyBuilder, TermDictionary, unbuilt_chunks
+
+builder = OntologyBuilder()                      # or mode="enrich" with an llm
+onto = builder.build({"2024.md": [...chunks...]})
+
+# later: only the chunks the ontology has not seen are extracted (by chunk id); the
+# post-build re-runs over the whole graph, hierarchy induction only where new names can
+# reach. In enrich mode the LLM pass covers only chunks it has not asked about yet.
+unbuilt_chunks(onto, {"2024.md": [...], "2025.md": [...]})     # what extend() would do
+builder.extend(onto, {"2024.md": [...], "2025.md": [...]})
+
+# a term dictionary (acronym -> full form, house spelling -> official one) applies at
+# build time, at query time and at indexing time
+d = TermDictionary("finance")
+d.bulk_import([{"alias": "DSR", "canonical": "총부채원리금상환비율"}])
+OntologyBuilder(dictionary=d).build(docs)                    # aliases canonicalized in the graph
+d.normalize_query("DSR 60% 고객")                             # -> "DSR 60% 고객 총부채원리금상환비율"
+d.normalize_text("고객의 DSR 50%")                            # -> "고객의 DSR(총부채원리금상환비율) 50%"
+
+# English IRI local names for a non-ASCII ontology, translated once per name and cached
+onto.translate(llm)          # classes UpperCamelCase, properties lowerCamelCase
+onto.to_turtle()             # :CreditRating a owl:Class ; rdfs:label "신용등급"
+```
 
 ### Search — one-shot GraphRAG
 
@@ -158,6 +186,9 @@ src/xgen_ontology/
     govern.py        # predicate governance, direction vote, stem / co-extension merge
     dedup.py         # rule + LLM + vector dedup
     hierarchy.py     # is-a cleaning, self-typed repair, property inheritance, SCS
+    finalize.py      # graph normalization (the store-loading rules)
+    dictionary.py    # TermDictionary: alias -> canonical at build / query / indexing time
+    translate.py     # LLM translation of names to English IRI local names
     quality.py     # graph-reviewer score
     community.py   # Louvain
     emit.py        # Turtle / OWL

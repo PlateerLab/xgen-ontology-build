@@ -1,3 +1,46 @@
+# 0.7.0 (2026-09-15)
+
+**Everything that was still only in the product is now in the library.** Incremental
+builds, the store-loading rules, IRI translation, the term dictionary and community
+membership, each without its database plumbing.
+
+- **Incremental build** -- `OntologyBuilder.extend(onto, documents, rebuild=False)`
+  extracts only the chunks the ontology has not seen (by chunk id), uses the whole
+  corpus as the discriminativeness denominator, re-runs the post-build and restricts
+  hierarchy induction to the new names and the existing names they can touch (the
+  production `only_uris` delta, `_touched_by_new`). In `enrich` mode the LLM relation
+  pass covers only chunks not yet asked about (`Ontology.enriched_chunks`, the
+  production enrich baseline). `unbuilt_chunks(onto, documents)` shows what an
+  extension would do -- the check the production auto-backfill runs per collection.
+  `BuildReport.chunks` counts what the ontology has seen.
+- **`build.finalize.normalize_graph`** (new, runs at the end of every build) -- the
+  production store-loading rules (`serialize_graph`): class-shaped names only, with
+  referenced classes declared; relations named with graph vocabulary (`type`,
+  `instanceOf`, `subClassOf`, `sameAs`) become typing statements, hierarchy edges or
+  folds; a relation whose predicate is a declared datatype property or whose object
+  is a value becomes an attribute; a value is never a subject; a name that occurs
+  only as an endpoint or an attribute's subject becomes an individual (punning, as
+  the store does); duplicate records merge. Verified against the production function
+  on a 16,400-node build: identical node, edge and attribute sets.
+  `BuildReport.normalized` carries the counts.
+- **`build.translate`** (new) -- `translate_names` (LLM, batches of 50, cached),
+  `english_local_name` (classes UpperCamelCase, properties lowerCamelCase),
+  `clean_korean_name`; `Ontology.translate(llm)` fills `Ontology.translations`, which
+  the emitters already consumed; the emitter now applies the case rule. The
+  production OWL generator's identifier logic, without rdflib.
+- **`build.dictionary`** (new) -- `TermDictionary` / `Term`: upsert by normalized
+  alias, `bulk_import`, activation, element linking; `normalize_query` (expand /
+  replace, Hangul-aware word boundaries), `normalize_text` (idempotent
+  `alias(canonical)` for indexing), `apply_to_build` (canonicalize the build models).
+  `OntologyBuilder(dictionary=...)` applies it in the pipeline. The production
+  dictionary service and its query / indexing normalizers, minus the tables.
+- `Ontology.community_of()` -- instance -> Louvain community id (the production
+  community tag), next to the existing `communities()` summary.
+
+Not ported, by design: PG dual-write and the `nkey` column (storage of the key the
+library computes on the fly), job/session bookkeeping, OWL serialization via rdflib
+(the library emits Turtle / OWL itself).
+
 # 0.6.0 (2026-09-15)
 
 **The document build no longer needs an LLM.** The whole production build path of

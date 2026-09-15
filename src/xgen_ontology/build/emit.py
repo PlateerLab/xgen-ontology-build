@@ -39,19 +39,20 @@ def to_rdf_triples(
 ) -> list[RDFTriple]:
     translations = translations or {}
 
-    def local(name: str) -> str:
+    def local(name: str, is_class: bool) -> str:
         eng = translations.get(name)
         if eng:
             cleaned = re.sub(r"[^A-Za-z0-9]", "", eng)
             if cleaned:
-                return cleaned
+                # classes UpperCamelCase, properties lowerCamelCase (the OWL convention)
+                return (cleaned[0].upper() if is_class else cleaned[0].lower()) + cleaned[1:]
         return safe_uri(name)
 
     def cls_uri(name: str) -> str:
-        return SCHEMA_NS + local(name)
+        return SCHEMA_NS + local(name, True)
 
     def prop_uri(name: str) -> str:
-        return SCHEMA_NS + local(name)
+        return SCHEMA_NS + local(name, False)
 
     def inst_uri(name: str) -> str:
         return INSTANCE_NS + safe_uri(name)

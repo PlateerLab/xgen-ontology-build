@@ -21,7 +21,7 @@ def build_from_documents(documents, llm=None, *, mode: str = "basic", morphology
                          hierarchy: bool = True, resolve: bool = False, chunk: bool = True,
                          chunk_size: int = 1200, chunk_overlap: int = 150,
                          header_patterns=(), unit_scales: dict | None = None,
-                         related_predicate: str | None = "관련") -> Ontology:
+                         related_predicate: str | None = "관련", dictionary=None) -> Ontology:
     """Build an ontology from text (and/or table) documents.
 
     ``documents`` = ``{name: text}`` or ``{name: [chunk, ...]}``. Raw prose strings
@@ -35,12 +35,14 @@ def build_from_documents(documents, llm=None, *, mode: str = "basic", morphology
     ``hierarchy`` (default on, zero LLM calls) induces is-a edges from Hearst
     patterns in the text and from the structure of the names. ``header_patterns``
     are compiled regexes for ingestion preambles to strip from chunks;
-    ``related_predicate=None`` turns off the leading-word neighbour relation."""
+    ``related_predicate=None`` turns off the leading-word neighbour relation; a
+    ``dictionary`` (:class:`~xgen_ontology.TermDictionary`) canonicalizes aliases.
+    Add documents later with ``OntologyBuilder(...).extend(onto, documents)``."""
     return OntologyBuilder(llm, mode=mode, morphology=morphology, embedder=embedder, domain=domain,
                            dedup=dedup, scs=scs, hierarchy=hierarchy, resolve=resolve, chunk=chunk,
                            chunk_size=chunk_size, chunk_overlap=chunk_overlap,
                            header_patterns=header_patterns, unit_scales=unit_scales,
-                           related_predicate=related_predicate).build(documents)
+                           related_predicate=related_predicate, dictionary=dictionary).build(documents)
 
 
 def build_from_text(text: str, *, name: str = "document.txt", llm=None, **kwargs) -> Ontology:

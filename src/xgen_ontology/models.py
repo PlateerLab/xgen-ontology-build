@@ -151,6 +151,8 @@ class BuildReport:
     folded: int = 0            # name fragments folded back into the name they came from
     pruned: int = 0            # unlinked common-word entities dropped
     llm_calls: int = 0
+    chunks: int = 0            # chunks the ontology has seen (grows with extend())
     mode: str = ""             # "basic" | "enrich" | "llm"
+    normalized: dict = field(default_factory=dict)   # normalize_graph() counts (rerouted / dropped)
     quality: dict = field(default_factory=dict)   # review_quality() of the finished build
     notes: list[str] = field(default_factory=list)
