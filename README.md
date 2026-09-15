@@ -1,5 +1,7 @@
 # xgen-ontology
 
+**Independent graph building:** [portable hierarchy, embeddings and graph exchange](docs/knowledge.md).
+
 **Backend-agnostic ontology / knowledge-graph toolkit.** Turn documents or tables
 into a *clean* knowledge graph — extract, dedup, induce the is-a hierarchy, govern
 predicates, score quality — then **search it with one-shot GraphRAG**. **Zero LLM

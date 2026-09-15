@@ -20,7 +20,6 @@ from .build import emit as _emit
 from .build.community import detect_communities
 from .build.quality import review_quality
 from .models import BuildReport, Chunk, Concepts, DataValue, Instance, Node, RDFTriple, Relation, SearchResult
-from .search.oneshot import GraphRAG
 
 _ISA_PREDICATES = {"instanceof", "instance_of", "type", "rdf:type", "a", "subclassof", "subclass_of", "is-a", "isa"}
 
@@ -81,6 +80,11 @@ class Ontology:
         return InMemoryVector(self.chunks, embedder=embedder)
 
     def search(self, question: str, *, llm=None, embedder=None, **kwargs) -> SearchResult:
+        import warnings
+
+        from .search.oneshot import GraphRAG
+        warnings.warn("Ontology.search is legacy; export knowledge to xgen-omnifuse",
+                      DeprecationWarning, stacklevel=2)
         engine = GraphRAG(self.graph(), self.vector(embedder=embedder), llm, **kwargs)
         return engine.search(question)
 

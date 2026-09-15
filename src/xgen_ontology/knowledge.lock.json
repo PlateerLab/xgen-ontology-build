@@ -1,0 +1,6 @@
+{
+  "contract_version": "1.0",
+  "records_sha256": "f757694dafe6a44f2930448ad59202594070e4ef305b79deb5c8b00317e06800",
+  "schema_sha256": "55a27237d8736171faf6d5d7f0fdd227f83ff0ce1d31a75fc7499d160827e984",
+  "source": "PlateerLab/xgen-ontology-build/contracts/knowledge/v1"
+}

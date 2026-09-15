@@ -1,0 +1,319 @@
+{
+  "$comment": "Structural schema plus records.py semantic validation (IDs, source revisions, cycles, vectors).",
+  "$defs": {
+    "ChunkEmbedding": {
+      "additionalProperties": false,
+      "properties": {
+        "chunk_id": {
+          "type": "string"
+        },
+        "profile_id": {
+          "type": "string"
+        },
+        "values": {
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "chunk_id",
+        "profile_id",
+        "values"
+      ],
+      "type": "object"
+    },
+    "EmbeddingProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "dimension": {
+          "type": "integer"
+        },
+        "extensions": {
+          "type": "object"
+        },
+        "id": {
+          "type": "string"
+        },
+        "metric": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "model_revision": {
+          "type": "string"
+        },
+        "preprocessing": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "model",
+        "model_revision",
+        "dimension"
+      ],
+      "type": "object"
+    },
+    "Evidence": {
+      "additionalProperties": false,
+      "properties": {
+        "chunk_id": {
+          "type": "string"
+        },
+        "extensions": {
+          "type": "object"
+        },
+        "id": {
+          "type": "string"
+        },
+        "locator": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "chunk_id"
+      ],
+      "type": "object"
+    },
+    "GraphEntity": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "extensions": {
+          "type": "object"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "type": "object"
+    },
+    "GraphFact": {
+      "additionalProperties": false,
+      "properties": {
+        "assertion": {
+          "type": "string"
+        },
+        "datatype": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "extensions": {
+          "type": "object"
+        },
+        "id": {
+          "type": "string"
+        },
+        "literal": {},
+        "object_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "predicate": {
+          "type": "string"
+        },
+        "subject_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "subject_id",
+        "predicate"
+      ],
+      "type": "object"
+    },
+    "KnowledgeBundle": {
+      "additionalProperties": false,
+      "properties": {
+        "chunks": {
+          "items": {
+            "$ref": "#/$defs/SourceChunk"
+          },
+          "type": "array"
+        },
+        "components": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "contract_version": {
+          "const": "1.0"
+        },
+        "corpus_id": {
+          "type": "string"
+        },
+        "embeddings": {
+          "items": {
+            "$ref": "#/$defs/ChunkEmbedding"
+          },
+          "type": "array"
+        },
+        "entities": {
+          "items": {
+            "$ref": "#/$defs/GraphEntity"
+          },
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "type": "array"
+        },
+        "extensions": {
+          "type": "object"
+        },
+        "facts": {
+          "items": {
+            "$ref": "#/$defs/GraphFact"
+          },
+          "type": "array"
+        },
+        "profiles": {
+          "items": {
+            "$ref": "#/$defs/EmbeddingProfile"
+          },
+          "type": "array"
+        },
+        "resources": {
+          "items": {
+            "$ref": "#/$defs/Resource"
+          },
+          "type": "array"
+        },
+        "snapshot_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "corpus_id",
+        "snapshot_id"
+      ],
+      "type": "object"
+    },
+    "Resource": {
+      "additionalProperties": false,
+      "properties": {
+        "content_digest": {
+          "type": "string"
+        },
+        "extensions": {
+          "type": "object"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "name"
+      ],
+      "type": "object"
+    },
+    "SourceChunk": {
+      "additionalProperties": false,
+      "properties": {
+        "extensions": {
+          "type": "object"
+        },
+        "extraction_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "locator": {
+          "type": "object"
+        },
+        "ordinal": {
+          "type": "integer"
+        },
+        "resource_id": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "resource_id",
+        "revision",
+        "extraction_id",
+        "text"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:xgen:knowledge:1.0",
+  "$ref": "#/$defs/KnowledgeBundle",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}
