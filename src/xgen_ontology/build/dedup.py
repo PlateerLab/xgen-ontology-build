@@ -15,11 +15,20 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
+from functools import lru_cache
 
+from ..korean import tokenize
 from ..llm import invoke_json
 from ..models import Concepts, DataValue, Instance, Relation
 
 _SEP = re.compile(r"[\s_\-·•/\\()（）「」『』【】\[\]]+")
+# Content-morpheme tags used for the normalization key when the bundled Korean analyzer
+# is available: nouns, foreign script, Hanja, symbols, digits, and XPN (negation/degree
+# prefixes -- dropping those flips the meaning).
+_KEY_TAGS = ("SL", "SH", "SW", "XPN", "SN")
+_QUOTE_CATEGORIES = ("Pi", "Pf")
+_QUOTE_NAME_PARTS = ("QUOTATION MARK", "APOSTROPHE", "PRIME", "GRAVE ACCENT")
 _EN_NOISE = re.compile(
     r"(to|from|of|by|with|for|the|and|or|is|are|has|have|belongs|connection|link|relation|mapping|reference)"
 )
@@ -90,10 +99,60 @@ class Deduplicator:
 
         return merged
 
+    def compute_rename_map(self, concepts: Concepts) -> dict[str, str]:
+        """Schema synonym map only (classes + object properties), nothing applied.
+
+        The same LLM and rule passes as :meth:`deduplicate`, flattened
+        (``a->b, b->c`` becomes ``a->c``) with self-maps removed. Used by the
+        enrich build, which folds synonyms after the base build rather than during it.
+        """
+        rename: dict[str, str] = {}
+        classes = [c for c in concepts.classes if c.name]
+        if len(classes) >= 3:
+            rename.update(self._llm_synonyms(
+                [f"- {c.name}: {c.description}" for c in classes],
+                system="You identify synonymous classes that denote the same concept.",
+                rules=("Merge only different names for the *same* concept.\n"
+                       "Treat a term and its translation as the same (keep the original-language name).\n"
+                       "Never merge a parent with its subclass."),
+                label="class"))
+        props = concepts.object_properties
+        if len(props) >= 2:
+            rename.update(self._normalize_object_properties(props))
+        named = [p for p in props if p.name]
+        if len(named) >= 3:
+            rename.update(self._llm_synonyms(
+                [f"- {p.name} (domain: {p.domain or '?'}, range: {p.range or '?'})" for p in named],
+                system="You identify synonymous relations (object properties).",
+                rules=("Merge only different names for the *same* relation.\n"
+                       "Treat a term and its translation as the same (keep the original-language name).\n"
+                       "Merge more readily when domain and range match."),
+                label="relation"))
+        flat: dict[str, str] = {}
+        for k, v in rename.items():
+            if not k or not v:
+                continue
+            seen = {k}
+            while v in rename and rename[v] != v and rename[v] not in seen:
+                seen.add(v)
+                v = rename[v]
+            if k != v:
+                flat[k] = v
+        return flat
+
     # ── rule passes ──
 
     def _norm_key(self, name: str) -> str:
-        cleaned = _SEP.sub("", (name or "").strip())
+        """Content-morpheme key: particles/endings/spacing variants fold together.
+
+        Leading quote characters are not part of a name. With an injected
+        :class:`~xgen_ontology.protocols.Morphology` its nouns form the key; else
+        the bundled Korean analyzer (when installed); else a cleaned lowercase form.
+        """
+        name = (name or "").strip()
+        while name and _is_quote_char(name[0]):
+            name = name[1:].lstrip()
+        cleaned = _SEP.sub("", name)
         if not cleaned:
             return ""
         if self.morph is not None:
@@ -103,6 +162,12 @@ class Deduplicator:
                     return "".join(nouns).lower()
             except Exception:
                 pass
+        else:
+            toks = tokenize(cleaned)
+            if toks:
+                nouns = [t.form for t in toks if t.tag.startswith("N") or t.tag in _KEY_TAGS]
+                if nouns:
+                    return "".join(nouns).lower()
         return cleaned.lower()
 
     def _norm_prop_key(self, name: str) -> str:
@@ -110,20 +175,23 @@ class Deduplicator:
         return _EN_NOISE.sub("", key)
 
     def _normalize_instances(self, instances: list[Instance]) -> dict[str, str]:
-        seen: dict[str, str] = {}
-        rename: dict[str, str] = {}
+        """Same key -> one name; the canonical is the shortest spelling (closest to the base form)."""
+        groups: dict[str, list[str]] = {}
         for inst in instances:
             name = inst.name
             if not name:
                 continue
             key = self._norm_key(name)
-            if not key:
+            if key and name not in groups.setdefault(key, []):
+                groups[key].append(name)
+        rename: dict[str, str] = {}
+        for names in groups.values():
+            if len(names) < 2:
                 continue
-            if key in seen:
-                if name != seen[key]:
-                    rename[name] = seen[key]
-            else:
-                seen[key] = name
+            canon = min(names, key=lambda s: (len(s), s))
+            for n in names:
+                if n != canon:
+                    rename[n] = canon
         return rename
 
     def _normalize_object_properties(self, obj_props) -> dict[str, str]:
@@ -304,3 +372,43 @@ def _cosine(a, b) -> float:
     if na <= 0.0 or nb <= 0.0:
         return 0.0
     return dot / (math.sqrt(na) * math.sqrt(nb))
+
+
+@lru_cache(maxsize=512)
+def _is_quote_char(ch: str) -> bool:
+    if unicodedata.category(ch) in _QUOTE_CATEGORIES:
+        return True
+    name = unicodedata.name(ch, "")
+    return any(part in name for part in _QUOTE_NAME_PARTS)
+
+
+_NAME_TAGS = ("NNG", "NNP", "NNB", "XSN", "SL", "SH", "SN", "XPN", "XR")
+
+
+def shorten_entity_name(name: str) -> str:
+    """Keep only the name in a sentence fragment an extractor returned as an entity.
+
+    Takes the leading run of noun-family morphemes and stops at the first particle,
+    ending or verb ("Korea Racing Authority-NOM" -> "Korea Racing Authority"). A
+    name that is already all nouns is untouched; when nothing can be kept, or no
+    analyzer is installed, the original is returned. Losing a name loses knowledge,
+    so the safe side is to keep it.
+    """
+    t = (name or "").strip()
+    if not t:
+        return t
+    toks = tokenize(t)
+    if not toks:
+        return t
+    if all(x.tag in _NAME_TAGS for x in toks):
+        return t
+    kept = []
+    for x in toks:
+        if x.tag in _NAME_TAGS:
+            kept.append(x)
+            continue
+        break
+    if not kept:
+        return t
+    head = t[kept[0].start:kept[-1].start + kept[-1].len].strip()
+    return head or t

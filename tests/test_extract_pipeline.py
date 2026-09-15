@@ -41,7 +41,7 @@ def test_pipeline_text_plus_table():
         "doc1": "Rule A applies to Acme Bank since 2020.",
         "colors.csv": "color_id,name\n10,Red\n20,Blue",
     }
-    onto = build_from_documents(docs, llm=CallableLLM(_stub))
+    onto = build_from_documents(docs, llm=CallableLLM(_stub), mode="llm")
     names = {c.name for c in onto.concepts.classes}
     assert "Regulation" in names and "Colors" in names      # text + table merged
     assert onto.report.llm_calls >= 1

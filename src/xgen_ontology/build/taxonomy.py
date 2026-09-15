@@ -1,83 +1,32 @@
-"""Is-a hierarchy induction from raw text and from class names -- zero LLM calls.
+"""Hierarchy induction from raw text and from the names themselves -- zero LLM calls.
 
-Two independent, complementary techniques, both ported from a Korean-language
-production ontology pipeline where the base build (headers + LLM-free table
-analysis) alone produced a *flat* schema -- classes with no hierarchy at all.
+Ported from the XGEN production build, where the base extraction alone produced
+a *flat* schema. Three passes, all name/structure based, no domain word lists:
 
 * **Hearst patterns** (:func:`hearst_hierarchy`) read is-a straight out of prose:
   "blood, hair root, etc. bio-samples" says *bio-sample* is a hypernym of *blood*
-  and *hair root*. This is the classic 1992 method -- high precision, low recall
-  by nature, so it's used to pick up sure things, not to find everything.
-* **Head-noun compound decomposition** (:func:`induce_head_noun_hierarchy`) reads
-  is-a out of the *class names themselves*: in a compound noun the head (the
-  general category) comes last, in both Korean and English -- "corporate racing
-  business" is a kind of "business", "standing audit office" is a kind of "audit
-  office". This is a morphological fact, not a domain word list, so it holds
-  across any corpus.
+  and *hair root*. Classic 1992 method -- high precision, low recall by nature,
+  so it picks up sure things rather than everything.
+* **Name hygiene** before structure is read: :func:`fold_name_fragments` folds a
+  short name that never stood alone in the source back into the name it was cut
+  from; :func:`prune_common_words` drops an unlinked everyday word that got
+  extracted as an entity.
+* **Head-noun decomposition** (:func:`induce_head_noun_hierarchy`) reads is-a out
+  of class *and instance* names: in a compound the head (the general category)
+  comes last, in Korean and English alike -- "standing audit office" is a kind of
+  "audit office". A name used as a head is promoted to a class; a code-prefixed
+  spelling folds into its canonical name; a shared leading word links neighbours.
 
-Both are Korean-tuned (:mod:`xgen_ontology.korean` supplies the tokenizer) but
-degrade to word-boundary-only behavior with no morphological analyzer installed,
-rather than raising.
+Korean-tuned (:mod:`xgen_ontology.korean` supplies the tokenizer) but degrades to
+word-boundary-only behavior with no morphological analyzer installed.
 """
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 
 from ..korean import tokenize
-from ..models import Class, Concepts, Instance
-
-# ───────────────────────── prose guard ─────────────────────────
-
-_HTML_TABLE_BLOCK = re.compile(r"<table\b.*?</table>", re.S | re.I)
-_BRACKET_LINE = re.compile(r"^[\[(（].*[\])）]$")
-_PIPE_RULE_LINE = re.compile(r"^[\s|:\-]+$")
-
-
-def _looks_like_pipe_table(text: str) -> bool:
-    """At least a few lines with 2+ interior pipes -- a markdown/plain-text grid."""
-    hits = 0
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or _PIPE_RULE_LINE.match(line):
-            continue
-        if line.count("|") >= 2:
-            hits += 1
-            if hits >= 2:
-                return True
-    return False
-
-
-def prose_only(text: str) -> str:
-    """The prose portion of ``text``, with any embedded table stripped.
-
-    A Hearst pattern must not fire inside a table cell: a cell is an
-    enumeration, not a sentence, so the noun phrase after the anchor word is
-    not actually a hypernym of what came before it -- it's a shared column
-    value, not a category. Measured on a real corpus: of the raw pairs Hearst
-    found before this guard existed, 80% came from HTML tables embedded in
-    otherwise-prose chunks, and nearly all of them were wrong -- a materials
-    line item titled "production cost" ended up as the induced is-a parent of
-    "plaque" and "signboard", just because a table cell happened to list them
-    together.
-
-    This only strips the two generic, format-level table shapes a plain-text
-    extraction commonly leaves behind (literal ``<table>`` HTML, and a
-    pipe-delimited grid). It intentionally does not try to detect a table that
-    has been flattened to whitespace-aligned columns with no delimiter at all
-    -- that needs column-shape heuristics tuned to a specific document corpus,
-    which belongs in a caller's own preprocessing, not in a generic library.
-    """
-    t = (text or "").strip()
-    if not t:
-        return ""
-    if "<table" in t.lower():
-        return _HTML_TABLE_BLOCK.sub(" ", t)
-    if _looks_like_pipe_table(t):
-        return "\n".join(line for line in t.splitlines()
-                         if "|" not in line and not _BRACKET_LINE.match(line.strip()))
-    return t
-
+from ..models import Class, Concepts, Instance, Relation
+from .deterministic import is_common_word, prose_only  # noqa: F401  (re-exported)
 
 # ───────────────────────── Hearst patterns ─────────────────────────
 
@@ -215,6 +164,7 @@ def hearst_hierarchy(
     *,
     min_hyponyms: int = _DEFAULT_MIN_HYPONYMS,
     max_coverage: float = _DEFAULT_MAX_COVERAGE,
+    header_patterns=(),
 ) -> list[tuple[str, str]]:
     """Chunks of prose -> ``[(parent, child), ...]``. Zero LLM calls.
 
@@ -228,7 +178,7 @@ def hearst_hierarchy(
     dropped as non-discriminative (generic words like "etc." or "results" show up
     everywhere and say nothing about what they're the hypernym of).
     """
-    prose_texts = [prose_only(t) for t in texts]
+    prose_texts = [prose_only(t, header_patterns) for t in texts]
     by_parent: dict[str, set] = defaultdict(set)
     for text in prose_texts:
         for hypo, hyper in extract_hearst_pairs(text):
@@ -255,147 +205,216 @@ def hearst_hierarchy(
     return [(parent, child) for child, (parent, _count) in sorted(best.items())]
 
 
-# ───────────────────────── head-noun compound decomposition ─────────────────────────
+# ───────────────────────── name-structure induction ─────────────────────────
 
-_HEAD_MIN_LEN = 2  # a head noun needs at least this many characters to mean anything
-_MODIFIER_MIN_LEN = 2  # same for the modifier in front of it
-_VARIANT_MAX_LEN = 20  # names longer than this aren't considered as a "piece" of another
-# Above this many class names, skip morpheme boundaries and use word boundaries only.
-# Trades a few missed compound links for build time that doesn't grow with corpus size
-# (empirically: ~4s for 20K labels with morphology, ~30s for 150K).
-_MORPHOLOGY_BUDGET = 30000
-_HANGUL_RANGE = ("가", "힣")
-
-
-def _has_hangul(text: str) -> bool:
-    return any(_HANGUL_RANGE[0] <= ch <= _HANGUL_RANGE[1] for ch in text)
+_HEAD_MIN_TAIL = 2      # a head noun needs at least this many characters to mean anything
+_HEAD_MIN_MOD = 2       # same for the modifier in front of it
+_VARIANT_MAX_LEN = 20   # names longer than this are not considered a fragment of another
+_MORPH_BUDGET = 30000   # above this many names, morpheme boundaries are skipped (build time)
+_COMMON_MAX_LEN = 8     # a common-word node is a short single word
+_HANGUL = ("가", "힣")
+DEFAULT_RELATED_PREDICATE = "관련"
 
 
-def _is_code(text: str) -> bool:
-    """A classification code or serial number, not a name (has a digit, no Hangul)."""
-    return bool(text) and any(ch.isdigit() for ch in text) and not _has_hangul(text)
-
-
-def _morpheme_starts(text: str) -> set[int] | None:
+def _morph_starts(text: str) -> set[int] | None:
     toks = tokenize(text)
     return {t.start for t in toks} if toks else None
 
 
-def _boundary_parts(label: str, use_morphology: bool = True) -> tuple[list[str], list[str]]:
-    """A name cut at its boundaries -> ``(leading pieces, trailing pieces)``.
+def _has_hangul(text: str) -> bool:
+    return any(_HANGUL[0] <= ch <= _HANGUL[1] for ch in text)
 
-    Both word boundaries and morpheme boundaries are considered, which keeps the
-    number of pieces proportional to the name's length -- pair-matching against a
-    lookup table stays a dictionary lookup instead of an all-pairs comparison.
-    """
+
+def _is_code(text: str) -> bool:
+    """A classification code or serial number: has a digit, no Hangul."""
+    return bool(text) and any(ch.isdigit() for ch in text) and not _has_hangul(text)
+
+
+def _boundary_parts(label: str, use_morph: bool = True) -> tuple[list[str], list[str]]:
+    """A name cut at its boundaries -> ``(leading pieces, trailing pieces)``."""
     heads: list[str] = []
     tails: list[str] = []
-    words = label.split()
-    if len(words) > 1:
-        for cut in range(1, len(words)):
-            heads.append(" ".join(words[:cut]))
-            tails.append(" ".join(words[cut:]))
-    # A name with spaces already has word boundaries to work with; morphology is
-    # only worth running on names written as one unbroken compound (it costs time).
-    starts = _morpheme_starts(label) if (use_morphology and len(words) == 1) else None
-    for offset in sorted(starts or ()):
-        if 0 < offset < len(label):
-            heads.append(label[:offset])
-            tails.append(label[offset:])
+    parts = label.split()
+    if len(parts) > 1:
+        for cut in range(1, len(parts)):
+            heads.append(" ".join(parts[:cut]))
+            tails.append(" ".join(parts[cut:]))
+    # Spaced names already have word boundaries; morphology only runs on unspaced compounds.
+    starts = _morph_starts(label) if (use_morph and len(parts) == 1) else None
+    for off in sorted(starts or ()):
+        if 0 < off < len(label):
+            heads.append(label[:off])
+            tails.append(label[off:])
     return heads, tails
 
 
-def induce_head_noun_hierarchy(
-    labels: list[str],
-) -> tuple[list[tuple[str, str]], dict[str, str]]:
-    """Class names -> ``(subclass edges, sameAs-style rename map)``. Zero LLM calls.
+def _variant_holders(weak: list[str], labels: list[str]) -> dict[str, list[str]]:
+    """For each fragment candidate, the longer names containing it (longest first).
 
-    In both Korean and English, a compound noun's **head sits last**: if ``B`` is
-    a suffix of ``A``, then ``A`` is a kind of ``B`` -- "corporate racing
-    business" is-a "business", "standing audit office" is-a "audit office". This
-    is a rule about word structure, not a domain word list, so it holds no matter
-    what the corpus is about. A modifier in *front* is not evidence of anything:
-    "product catalog" is a kind of catalog, not a kind of product.
-
-    Two failure modes this filters out (found by running it on real data):
-
-    * An accidental suffix match that starts mid-morpheme is not a real head
-      noun. Only boundaries the tokenizer actually recognizes count.
-    * **A name with a space in it is two words, not one compound.** "Department
-      Chairman's Office" is not a subclass of "Chairman's Office" -- it's a
-      table-header prefix stuck in front of a spelling that already existed. When
-      the part in front of the space is *only* a code ("NA162000.23 Jeju Ranch
-      Business"), that's the same concept under a different spelling, so it comes
-      back as a rename (sameAs) instead of a hierarchy edge; otherwise it's
-      neither and nothing is produced.
-
-    Returns ``(edges, rename)`` where ``edges`` is ``[(parent, child), ...]`` and
-    ``rename`` maps a name that should be folded away to the name it becomes.
+    A candidate that stands as a whole word inside the longer name is not a
+    fragment of it but a place to attach to, so it is not counted.
     """
+    weak_labels = set(weak)
+    hits: dict[str, list[str]] = {}
+    for ll in labels:
+        if len(ll) <= _HEAD_MIN_TAIL:
+            continue
+        words = set(ll.split())
+        for cut in range(1, min(len(ll), _VARIANT_MAX_LEN + 1)):
+            for piece in (ll[cut:], ll[:cut]):
+                if len(piece) >= _HEAD_MIN_TAIL and piece in weak_labels and piece not in words:
+                    hits.setdefault(piece, []).append(ll)
+    for k in hits:
+        hits[k] = sorted(set(hits[k]), key=lambda h: (-len(h), h))   # longest first, ties by spelling
+    return {lb: hits[lb] for lb in weak if hits.get(lb)}
+
+
+def _resolve_fold_chain(fold: dict[str, str]) -> dict[str, str]:
+    """Follow chained folds to the surviving name."""
+    out = dict(fold)
+    for su in list(out):
+        seen = {su}
+        tu = out[su]
+        while tu in out and tu not in seen:
+            seen.add(tu)
+            tu = out[tu]
+        out[su] = tu
+    return out
+
+
+def fold_name_fragments(
+    names: list[str],
+    chunks_of: dict[str, set],
+    linked: set[str],
+) -> dict[str, str]:
+    """Fold name fragments that never stood alone in the source back into the name they came from.
+
+    A fragment is a short name (2..20 chars) with no edge of any kind and at least
+    one source chunk; it is folded into a longer name that contains it (not as a
+    whole word) when every chunk the fragment appears in also contains the longer
+    name. Returns ``{fragment: holder}``; the caller removes the fragment and moves
+    its chunks. Ported from the production ``consolidate_name_variants``.
+    """
+    weak = sorted(
+        {n for n in names if n and _HEAD_MIN_TAIL <= len(n) <= _VARIANT_MAX_LEN
+         and n not in linked and chunks_of.get(n)},
+        key=lambda s: (len(s), s))
+    if not weak:
+        return {}
+    holders = _variant_holders(weak, [n for n in dict.fromkeys(names) if n])
+    if not holders:
+        return {}
+    fold: dict[str, str] = {}
+    for sl in weak:
+        sc = chunks_of.get(sl) or set()
+        if not sc:
+            continue
+        for ll in holders.get(sl, ()):
+            if ll != sl and sc <= (chunks_of.get(ll) or set()):
+                fold[sl] = ll
+                break
+    return _resolve_fold_chain(fold)
+
+
+def prune_common_words(
+    instance_names: list[str], linked: set[str], *, rank_max: int = 5000,
+) -> set[str]:
+    """Instance names that are a verbal habit rather than a name.
+
+    A short (2..8 chars) single common noun with no edge of any kind: not typed,
+    in no relation. See :func:`~xgen_ontology.build.deterministic.is_common_word`
+    for how "common" is judged (analyzer dictionary rank, no word list).
+    """
+    return {n for n in dict.fromkeys(instance_names)
+            if n and 2 <= len(n) <= _COMMON_MAX_LEN and n not in linked
+            and is_common_word(n, rank_max)}
+
+
+def induce_head_noun_hierarchy(
+    labels: list[str], *, class_labels: set[str] | None = None,
+) -> tuple[list[tuple[str, str]], dict[str, str], list[tuple[str, str]]]:
+    """Names -> ``(subclass edges, sameAs renames, related pairs)``. Zero LLM calls.
+
+    In a Korean (or English) compound the **head sits last**: if ``B`` is a
+    boundary-aligned suffix of ``A``, ``A`` is a kind of ``B`` ("standing audit
+    office" is-a "audit office"). Only tokenizer-recognized boundaries count. A
+    space before the tail makes two words, not a compound: when what precedes the
+    space is only a code ("NA162000.23 Jeju Ranch Business") the two spellings
+    name the same thing (sameAs rename); otherwise nothing is produced. A leading
+    word that is itself a known name is a same-topic neighbour ("related").
+
+    ``class_labels`` orders the lookup so a class wins over an instance with the
+    same spelling. Returns ``edges`` as ``[(parent, child)]``, ``rename`` as
+    ``{spelling: canonical}``, ``related`` as ``[(name, neighbour)]``.
+    """
+    class_labels = class_labels or set()
     uniq = [lb for lb in dict.fromkeys(labels) if lb]
     if len(uniq) < 2:
-        return [], {}
-
-    use_morphology = len(uniq) <= _MORPHOLOGY_BUDGET
+        return [], {}, []
+    # Classes first, then longer names first: the order the production store uses.
+    uniq.sort(key=lambda lb: (lb not in class_labels, -len(lb)))
     by_label = set(uniq)
-    best: dict[str, tuple[str, str]] = {}  # child -> (parent, matched tail)
-    rename: dict[str, str] = {}
-
-    for name in uniq:
-        heads, tails = _boundary_parts(name, use_morphology)
+    use_morph = len(uniq) <= _MORPH_BUDGET
+    best: dict[str, str] = {}
+    same: dict[str, str] = {}
+    related: list[tuple[str, str]] = []
+    for cl in uniq:
+        heads, tails = _boundary_parts(cl, use_morph)
         for tail in tails:
-            if tail not in by_label or tail == name or len(tail) < _HEAD_MIN_LEN:
+            if tail not in by_label or tail == cl or len(tail) < _HEAD_MIN_TAIL or not cl.endswith(tail):
                 continue
-            if not name.endswith(tail):
+            mod = cl[:len(cl) - len(tail)]
+            if len(mod) < _HEAD_MIN_MOD:
                 continue
-            modifier = name[: len(name) - len(tail)]
-            if len(modifier) < _MODIFIER_MIN_LEN:
+            if mod[-1].isspace():
+                if _is_code(mod.strip()):
+                    same.setdefault(cl, tail)
                 continue
-            if modifier[-1].isspace():
-                # Space before the tail -> two words, not a compound (see docstring).
-                if _is_code(modifier.strip()):
-                    rename[name] = tail
-                continue
-            if name not in best:
-                best[name] = (tail, tail)
+            if cl not in best:
+                best[cl] = tail
             break
-
-    edges = [(parent, child) for child, (parent, _tail) in best.items()]
-    return edges, rename
-
-
-# ───────────────────────── orchestrator ─────────────────────────
+        for head in heads:
+            if head in by_label and head != cl and head in cl.split():
+                related.append((cl, head))
+                break
+    edges = [(parent, child) for child, parent in best.items()]
+    return edges, same, related
 
 
 def induce_hierarchy(
     concepts: Concepts,
     texts: list[str] | None = None,
     instances: list[Instance] | None = None,
+    relations: list[Relation] | None = None,
     *,
     min_hyponyms: int = _DEFAULT_MIN_HYPONYMS,
     max_coverage: float = _DEFAULT_MAX_COVERAGE,
+    related_predicate: str | None = DEFAULT_RELATED_PREDICATE,
+    header_patterns=(),
 ) -> dict[str, int]:
-    """Run both techniques against ``concepts`` (and its source ``texts``), in place.
+    """Induce hierarchy in place: Hearst patterns over ``texts``, then name structure over classes *and* instances.
 
-    Order: Hearst first (it can *mint new classes* a table-header-only build never
-    saw), then head-noun decomposition over the resulting full class list (it only
-    *connects* existing classes, so it benefits from Hearst having run first).
-    Safe to call with ``texts=None`` (head-noun decomposition only, e.g. for a
-    pure-CSV build) or on a language with no morphological analyzer installed
-    (Hearst finds nothing without ``texts``' tokenizer; head-noun falls back to
-    word-boundaries-only and still works on space-separated compounds).
+    Name-structure results are applied the way the production store applies them:
+    a name used as another name's head becomes a class (an instance is promoted);
+    a class child gets a ``subClassOf`` edge; an instance child is typed by its
+    head class (an extra ``rdf:type`` when it already has one); a code-prefixed
+    spelling is folded into its canonical name; a leading-word neighbour becomes a
+    ``related_predicate`` relation (``None`` disables that).
 
     Returns ``{"hearst_classes_added", "hearst_edges_added", "compound_edges_added",
-    "renamed"}``.
+    "promoted", "typed", "renamed", "related_added"}``.
     """
+    instances = instances if instances is not None else []
+    relations = relations if relations is not None else []
     existing = {c.name for c in concepts.classes if c.name}
-    counts = {"hearst_classes_added": 0, "hearst_edges_added": 0,
-              "compound_edges_added": 0, "renamed": 0}
+    counts = {"hearst_classes_added": 0, "hearst_edges_added": 0, "compound_edges_added": 0,
+              "promoted": 0, "typed": 0, "renamed": 0, "related_added": 0}
 
     if texts:
         parent_of: dict[str, str] = {}
         for parent, child in hearst_hierarchy(texts, min_hyponyms=min_hyponyms,
-                                              max_coverage=max_coverage):
+                                              max_coverage=max_coverage,
+                                              header_patterns=header_patterns):
             parent_of.setdefault(child, parent)
             for name in (parent, child):
                 if name not in existing:
@@ -407,16 +426,64 @@ def induce_hierarchy(
                 concepts.class_hierarchy.append(edge)
                 counts["hearst_edges_added"] += 1
 
-    labels = [c.name for c in concepts.classes if c.name]
-    compound_edges, rename = induce_head_noun_hierarchy(labels)
-    for edge in compound_edges:
-        if edge not in concepts.class_hierarchy:
-            concepts.class_hierarchy.append(edge)
-            counts["compound_edges_added"] += 1
+    class_labels = {c.name for c in concepts.classes if c.name}
+    inst_labels = [i.name for i in instances if i.name]
+    edges, rename, related = induce_head_noun_hierarchy(
+        [*class_labels, *inst_labels], class_labels=class_labels)
+
+    # A head is a concept: an instance used as a head becomes a class (its chunks come along).
+    parents = {p for p, _ in edges}
+    promoted = sorted(parents - class_labels)
+    if promoted:
+        chunks: dict[str, list[str]] = {p: [] for p in promoted}
+        for i in instances:
+            if i.name in chunks:
+                chunks[i.name].extend(c for c in i.source_chunks if c not in chunks[i.name])
+        instances[:] = [i for i in instances if i.name not in chunks]
+        for p in promoted:
+            concepts.classes.append(Class(name=p, source_chunks=chunks[p]))
+            class_labels.add(p)
+            counts["promoted"] += 1
+    typed_by: dict[str, set] = {}
+    for i in instances:
+        if i.name:
+            typed_by.setdefault(i.name, set()).add(i.class_name or "")
+    hier = set(concepts.class_hierarchy)
+    for parent, child in edges:
+        if child in class_labels:
+            if (parent, child) not in hier:
+                concepts.class_hierarchy.append((parent, child))
+                hier.add((parent, child))
+                counts["compound_edges_added"] += 1
+            continue
+        classes_of = typed_by.get(child, set())
+        if parent in classes_of:
+            continue
+        if not classes_of - {""}:
+            for i in instances:
+                if i.name == child and not i.class_name:
+                    i.class_name = parent
+        else:
+            src = next(i for i in instances if i.name == child)
+            instances.append(Instance(name=child, class_name=parent,
+                                      source_chunks=list(src.source_chunks)))
+        typed_by.setdefault(child, set()).add(parent)
+        counts["typed"] += 1
+
     if rename:
         from .dedup import Deduplicator  # local import: avoid a hard import cycle
 
-        Deduplicator._apply_class(rename, concepts, instances or [])
+        Deduplicator._apply_class(rename, concepts, instances)
+        Deduplicator._apply_instance(rename, instances, relations, [])
         counts["renamed"] = len(rename)
 
+    if related_predicate and related:
+        have = {(r.subject, r.predicate, r.object) for r in relations}
+        for name, head in related:
+            name, head = rename.get(name, name), rename.get(head, head)
+            key = (name, related_predicate, head)
+            if name != head and key not in have:
+                relations.append(Relation(subject=name, predicate=related_predicate, object=head))
+                have.add(key)
+                counts["related_added"] += 1
     return counts

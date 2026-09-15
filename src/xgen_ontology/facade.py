@@ -1,6 +1,7 @@
 """One-call helpers — the friendly entry points.
 
-* ``build_from_documents(docs, llm)`` — LLM extraction + cleaning -> Ontology.
+* ``build_from_documents(docs)`` — zero-LLM structural extraction + cleaning -> Ontology
+  (``mode="enrich"`` / ``"llm"`` with an ``llm`` for relation enrichment / full LLM extraction).
 * ``build_from_csv(tables)`` — deterministic table -> Ontology (no LLM).
 * ``build_from_triples(triples)`` — searchable ontology from loose (s, p, o).
 """
@@ -15,26 +16,36 @@ from .build.pipeline import OntologyBuilder
 from .ontology import Ontology
 
 
-def build_from_documents(documents, llm=None, *, morphology=None, embedder=None,
-                         domain: str = "", dedup: bool = True, scs: bool = False,
-                         hierarchy: bool = True, chunk: bool = True,
-                         chunk_size: int = 1200, chunk_overlap: int = 150) -> Ontology:
+def build_from_documents(documents, llm=None, *, mode: str = "basic", morphology=None,
+                         embedder=None, domain: str = "", dedup: bool = True, scs: bool = False,
+                         hierarchy: bool = True, resolve: bool = False, chunk: bool = True,
+                         chunk_size: int = 1200, chunk_overlap: int = 150,
+                         header_patterns=(), unit_scales: dict | None = None,
+                         related_predicate: str | None = "관련") -> Ontology:
     """Build an ontology from text (and/or table) documents.
 
-    ``documents`` = ``{name: text}`` or ``{name: [chunk, ...]}``. Pass an ``llm`` to
-    extract from prose; table files (``.csv``/``.tsv``/``.xlsx``) build with no LLM.
-    Raw prose strings are auto-chunked (boundary-aware) unless ``chunk=False``.
+    ``documents`` = ``{name: text}`` or ``{name: [chunk, ...]}``. Raw prose strings
+    are auto-chunked (boundary-aware) unless ``chunk=False``; table files
+    (``.csv``/``.tsv``/``.xlsx``) build deterministically.
+
+    ``mode`` selects how prose is read: ``"basic"`` (default) is the zero-LLM
+    structural extraction plus rule post-build; ``"enrich"`` adds an LLM pass for
+    relations between the extracted entities and LLM synonym folding (needs
+    ``llm``); ``"llm"`` is full LLM extraction of schema and instances.
     ``hierarchy`` (default on, zero LLM calls) induces is-a edges from Hearst
-    patterns in the text and from head-noun decomposition of class names --
-    set ``False`` to keep the flat, headers/LLM-only schema."""
-    return OntologyBuilder(llm, morphology=morphology, embedder=embedder, domain=domain,
-                           dedup=dedup, scs=scs, hierarchy=hierarchy, chunk=chunk,
-                           chunk_size=chunk_size, chunk_overlap=chunk_overlap).build(documents)
+    patterns in the text and from the structure of the names. ``header_patterns``
+    are compiled regexes for ingestion preambles to strip from chunks;
+    ``related_predicate=None`` turns off the leading-word neighbour relation."""
+    return OntologyBuilder(llm, mode=mode, morphology=morphology, embedder=embedder, domain=domain,
+                           dedup=dedup, scs=scs, hierarchy=hierarchy, resolve=resolve, chunk=chunk,
+                           chunk_size=chunk_size, chunk_overlap=chunk_overlap,
+                           header_patterns=header_patterns, unit_scales=unit_scales,
+                           related_predicate=related_predicate).build(documents)
 
 
 def build_from_text(text: str, *, name: str = "document.txt", llm=None, **kwargs) -> Ontology:
     """Build from a single raw document string (parsed already to text). It is chunked,
-    extracted (if ``llm`` given) and cleaned end-to-end."""
+    extracted and cleaned end-to-end (no LLM needed; see ``mode``)."""
     return build_from_documents({name: text}, llm=llm, **kwargs)
 
 

@@ -66,7 +66,7 @@ _LEAD = re.compile(
     r"|[①-⑳]\s*"
     r"|[가-하][.)]\s+(?=[가-힣A-Za-z(])"
     r"|\([가-하]\)\s+"
-    r"|[□■○●◦▣▶※•․ㅇㅇ*†]\s*)+"
+    r"|[□■○●◦▣▶※•․ᄋㅇ*†]\s*)+"
 )
 # Trailing markers: footnote-style (1) / circled digits / asterisks and daggers.
 _TAIL = re.compile(r"(?:\s*\(\s*(?:\d{1,2}|[①-⑳])\s*\)|\s*[①-⑳]|[*※†]+)+$")

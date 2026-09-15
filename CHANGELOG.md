@@ -1,11 +1,92 @@
-# Unreleased
+# 0.6.0 (2026-09-15)
 
-**Repository model reversed.** `PlateerLab/xgen-ontology-build` is now the origin and
-publishes the package; `jinsoo96/js-ontology-build` is a read-only mirror that
-fast-forwards from it with its own `GITHUB_TOKEN` (no personal credential, nothing to
-expire). LICENSE gains §4, a written grant letting PlateerLab organization members use,
-modify, build and ship the Software as part of Plateer products. Not open source;
-copyright unchanged; the 0.1.0-0.3.0 MIT carve-out unchanged.
+**The document build no longer needs an LLM.** The whole production build path of
+XGEN as of this date is ported: structure-based extraction, the rule post-build, and
+the LLM reserved for an explicit enrich pass. Every ported function was checked
+against the production code on a real 14,924-chunk corpus (same input, byte-identical
+output; see the parity notes below). Collection / database plumbing was left behind;
+everything runs on the in-memory build models.
+
+- **`build.deterministic`** (new) -- `extract_deterministic` / `extract_as_dicts`:
+  zero-LLM extraction from document structure. HTML tables (rowspan/colspan expanded),
+  whitespace row dumps and pipe grids become row entities typed by the subject
+  column's header (the entity column with the most distinct values), value cells
+  become attributes, entity cells relations; a caption or the header prefixes rows
+  keyed by a value; headers carry across chunk boundaries of one document; a unit
+  row annotates its columns; codes, glosses and decorative parentheses are stripped
+  from names (a parenthetical that tells names apart is kept); the words before a
+  table are read as prose. Prose yields noun-phrase entities (morpheme-aware, with
+  affix and line-break rules) and (entity, attribute, value) facts. A shared head
+  noun becomes a class; a single unlinked everyday word is dropped; names in more
+  than `max_coverage` of the corpus are dropped as non-discriminative once the corpus
+  is large enough to judge. Hearst hierarchy runs inside it, on prose only.
+- **`OntologyBuilder(mode=...)`** -- `"basic"` (default, zero LLM calls), `"enrich"`
+  (basic + LLM relations between the extracted entities + LLM schema synonym
+  folding), `"llm"` (full LLM extraction, the pre-0.6 path). Without an `llm`,
+  `"enrich"`/`"llm"` run as `"basic"` and say so in `report.notes`. The stage order
+  is the production one: extraction -> instance-key merge -> predicate merge ->
+  fragment folding -> common-word pruning -> hierarchy from names -> vector/LLM dedup
+  -> self-typed repair -> hierarchy clean -> property inheritance -> quality review.
+  `BuildReport` gains `mode`, `folded`, `pruned`, `quality`.
+- **`build.taxonomy`** -- `induce_head_noun_hierarchy` now runs over class *and*
+  instance names and returns `(edges, renames, related)`: a name used as a head is
+  promoted to a class, an instance is typed by its head (an extra `rdf:type` when it
+  already has one), a code-prefixed spelling folds into its canonical name, a shared
+  leading word becomes a `related_predicate` relation (default `"관련"`, `None`
+  disables). New `fold_name_fragments` (a short name that never stood alone in the
+  source folds back into the longer name that covers all its chunks) and
+  `prune_common_words` (unlinked everyday words, judged by analyzer dictionary rank,
+  no word list). `prose_only` now also strips whitespace row dumps and ingestion
+  markers; `hearst_hierarchy` / `induce_hierarchy` take `header_patterns`.
+- **`build.govern`** -- `strip_argument_noun` (a subject/object noun glued into the
+  predicate), `seed_predicates` and a returned `canonical_map` in `govern_predicates`,
+  `vote_relation_direction` (flip the minority direction of a predicate by type-pair
+  majority, then by entity role), `merge_predicates` (same stem, or one predicate's
+  (subject, object) extension contained in another's; duplicate triples removed).
+- **`build.hierarchy`** -- `fix_self_typed_instances` (an instance typed by a class of
+  its own name moves to that class's parent or loses the typing),
+  `materialize_property_inheritance` (a parent's declared properties are declared on
+  its subclasses).
+- **`build.dedup`** -- the instance key ignores leading quote characters and, with
+  no injected morphology, uses the bundled Korean analyzer's content morphemes; the
+  canonical spelling is the shortest one. New `compute_rename_map` (schema synonym
+  map only) and `shorten_entity_name` (a sentence fragment returned as an entity
+  name is cut to its leading noun run).
+- **`build.extract`** -- `DocumentExtractor.extract_relations` (the enrich pass: the
+  known entities of each batch and the predicates already in use are offered; chunk
+  ids are aliased and unknown ids never kept), `include_relations`, an existing-class
+  context, row-aware splitting of oversized chunks, and rule post-processing: a data
+  value whose value is an entity becomes a relation and the reverse, sentence-fragment
+  entity names are shortened, direction is voted, predicates governed and the same
+  vocabulary applied to declarations and data values. `verify_numeric_units` only
+  corrects a power-of-ten error and leaves a value that also occurs bare in the source;
+  `KO_UNIT_SCALES` covers the compound units. `extraction_schema` (JSON schema for
+  structured output) is public; `invoke_json` uses an LLM's `generate_json(prompt,
+  system, schema)` when it has one.
+- **`build.tabular`** -- the name column is judged from the data (mostly text, mostly
+  distinct, not identifier codes; a code column only as fallback), a table with no
+  name column stays schema-only, rows whose labels would collide as IRIs are told
+  apart by their key, FK properties are named per column, and each row keeps the id of
+  the chunk it came from.
+- `resolve_entities` (fuzzy surface-form merging) is **off by default**
+  (`resolve=True` to keep it); the production build does not fuzzy-merge.
+- `korean.strip_list_markers` accepts both Hangul ieung glyphs as bullets.
+
+Parity notes: the deterministic extractor was run side by side with the production
+module on all 14,924 chunks of a customer corpus -- chunk facts, Hearst pairs,
+`prose_only` and the final four-part result were identical. The name-structure,
+fragment-folding, common-word and predicate-merge passes were run against the
+production store functions over a fake store fed the same 16K-node graph: identical
+edge sets (4,146 subclass, 5,285 related), fold and merge sets. Where the production
+code is order-dependent on ties (which longer name a fragment folds into), the port
+picks the spelling-first candidate deterministically.
+
+Also in this release: **repository model reversed.** `PlateerLab/xgen-ontology-build` is
+now the origin and publishes the package; `jinsoo96/js-ontology-build` is a read-only
+mirror that fast-forwards from it with its own `GITHUB_TOKEN` (no personal credential,
+nothing to expire). LICENSE gains §4, a written grant letting PlateerLab organization
+members use, modify, build and ship the Software as part of Plateer products. Not open
+source; copyright unchanged; the 0.1.0-0.3.0 MIT carve-out unchanged.
 
 # 0.5.0 (2026-09-09)
 

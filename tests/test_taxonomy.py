@@ -106,7 +106,7 @@ def test_prose_only_leaves_plain_prose_untouched():
 
 @kiwi_required
 def test_induce_head_noun_hierarchy_finds_compound_suffix():
-    edges, rename = induce_head_noun_hierarchy(["전사경마사업", "사업", "상임감사실", "감사실"])
+    edges, rename, _related = induce_head_noun_hierarchy(["전사경마사업", "사업", "상임감사실", "감사실"])
     assert ("사업", "전사경마사업") in edges
     assert ("감사실", "상임감사실") in edges
     assert rename == {}
@@ -115,12 +115,12 @@ def test_induce_head_noun_hierarchy_finds_compound_suffix():
 def test_induce_head_noun_hierarchy_keeps_spaced_multiword_names_intact():
     # "Korea Racing Authority" must not be split just because "Korea" is a
     # shorter existing name -- there is no modifier/head relationship here.
-    edges, _rename = induce_head_noun_hierarchy(["한국 마사회", "마사회", "한국"])
+    edges, _rename, _related = induce_head_noun_hierarchy(["한국 마사회", "마사회", "한국"])
     assert edges == []
 
 
 def test_induce_head_noun_hierarchy_folds_code_prefixed_duplicates():
-    edges, rename = induce_head_noun_hierarchy(
+    edges, rename, _related = induce_head_noun_hierarchy(
         ["NA162000.23 제주목장사업", "제주목장사업"]
     )
     assert rename == {"NA162000.23 제주목장사업": "제주목장사업"}
@@ -130,7 +130,7 @@ def test_induce_head_noun_hierarchy_folds_code_prefixed_duplicates():
 def test_induce_head_noun_hierarchy_rejects_prefix_modifiers():
     # a modifier in *front* is not evidence of anything ("product catalog" is
     # a kind of catalog, not a kind of product) -- only suffix matches count.
-    edges, _rename = induce_head_noun_hierarchy(["상품목록", "상품"])
+    edges, _rename, _related = induce_head_noun_hierarchy(["상품목록", "상품"])
     assert edges == []
 
 
@@ -160,4 +160,4 @@ def test_build_from_documents_induces_hierarchy_end_to_end():
     docs = {f"doc{i}.txt": t for i, t in enumerate([_HEARST_TEXT, *_FILLER_TEXTS])}
     onto = build_from_documents(docs, llm=None)  # zero LLM calls
     assert ("생체시료", "혈액") in onto.concepts.class_hierarchy
-    assert any("induced" in note for note in onto.report.notes)
+    assert onto.report.llm_calls == 0 and onto.report.mode == "basic"

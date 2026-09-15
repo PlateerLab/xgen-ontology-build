@@ -43,15 +43,23 @@ class CallableLLM:
 _FENCE = re.compile(r"```(?:json)?\s*(.+?)```", re.DOTALL | re.IGNORECASE)
 
 
-def invoke_json(llm: Any, system: str, user: str) -> dict:
-    """Call ``llm.generate`` and parse a JSON object out of the reply, leniently.
+def invoke_json(llm: Any, system: str, user: str, *, schema: dict | None = None) -> dict:
+    """Call the LLM and parse a JSON object out of the reply, leniently.
 
-    Returns ``{}`` on any failure (no LLM, non-JSON echo, parse error) so build
-    stages degrade gracefully to their rule-based behavior."""
+    When ``schema`` is given and the LLM exposes ``generate_json(prompt, system=,
+    schema=)`` (structured output), that is used and a dict reply is taken as is;
+    otherwise ``llm.generate`` is called and the text is parsed. Returns ``{}`` on
+    any failure (no LLM, non-JSON echo, parse error) so build stages degrade
+    gracefully to their rule-based behavior."""
     if llm is None:
         return {}
     try:
-        raw = llm.generate(user, system=system)
+        if schema is not None and hasattr(llm, "generate_json"):
+            raw = llm.generate_json(user, system=system, schema=schema)
+            if isinstance(raw, dict):
+                return raw
+        else:
+            raw = llm.generate(user, system=system)
     except Exception:
         return {}
     if not raw or not isinstance(raw, str):

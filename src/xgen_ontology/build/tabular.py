@@ -13,11 +13,13 @@ Two stages, both domain-general:
 from __future__ import annotations
 
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from html.parser import HTMLParser
 from typing import Any
 
 from ..models import Class, Concepts, DataProperty, DataValue, Instance, ObjectProperty, Relation
+from ..text import safe_uri
+from .deterministic import is_value
 
 TABLE_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls"}
 _REF_TABLE_MAX_ROWS = 200  # at/below this a table is treated as a dimension (instantiated)
@@ -77,13 +79,14 @@ def build_from_tables(
     ]
 
     object_properties: list[ObjectProperty] = []
-    seen_pairs: set = set()
+    seen_props: set = set()
     for fk in fk_relations:
         from_cls = table_class.get(fk["from_table"], _camel(fk["from_table"]))
         to_cls = table_class.get(fk["to_table"], _camel(fk["to_table"]))
-        if (from_cls, to_cls) in seen_pairs:
+        key = (from_cls, fk["from_column"], to_cls)
+        if key in seen_props:
             continue
-        seen_pairs.add((from_cls, to_cls))
+        seen_props.add(key)
         object_properties.append(ObjectProperty(name=f"{from_cls}_{fk['from_column']}",
                                                 domain=from_cls, range=to_cls))
 
@@ -119,24 +122,6 @@ def build_from_tables(
         if pk:
             table_pk[t["table_name"]] = pk[0]
 
-    # Pass 1 — parse rows + build PK -> instance-label lookups.
-    table_rows: dict[str, list[dict[str, str]]] = {}
-    pk_lookup: dict[str, dict[str, str]] = defaultdict(dict)
-    for fn, chunks in documents.items():
-        t = tables.get(fn)
-        if not t:
-            continue
-        raw = t["table_name"]
-        cols = t.get("columns", [])
-        pk_col = table_pk.get(raw)
-        label_col = _label_col(t)
-        rows = _rows_from_chunks(chunks, cols)
-        table_rows[fn] = rows
-        for i, row in enumerate(rows):
-            label = _instance_label(row, label_col, pk_col, raw, i)
-            if pk_col and row.get(pk_col, "").strip():
-                pk_lookup[raw][row[pk_col].strip()] = label
-
     # star-schema fact/dimension split (structure, not a magic row cap)
     fk_targets = {fk["to_table"] for fk in fk_relations}
     fk_source_only = {fk["from_table"] for fk in fk_relations} - fk_targets
@@ -149,29 +134,54 @@ def build_from_tables(
             return False
         return raw in fk_source_only or fk_col_count.get(raw, 0) >= 2
 
-    # Pass 2 — instances + relations + data values (FKs resolved through the lookup).
-    op_by_dr = {(op.domain, op.range): op.name for op in object_properties}
+    # Pass 1: rows, one instance label per row (duplicates split by identity), PK -> label.
+    # A table with no name column gets no instances: naming rows by their PK turns numbers
+    # into entities. Fact tables get none either.
+    table_rows: dict[str, list[dict[str, str]]] = {}
+    row_chunks: dict[str, list[list[str]]] = {}
+    table_labels: dict[str, list[str]] = {}
+    pk_lookup: dict[str, dict[str, str]] = defaultdict(dict)
     for fn, chunks in documents.items():
         t = tables.get(fn)
         if not t:
             continue
         raw = t["table_name"]
+        rows, src = _rows_from_chunks(chunks, t.get("columns", []))
+        table_rows[fn], row_chunks[fn] = rows, src
+        if _is_fact(raw, len(rows)):
+            continue
+        label_col = _label_col(t, rows)
+        if not label_col:
+            continue
+        pk_col = table_pk.get(raw)
+        labels = _instance_labels(rows, label_col, pk_col, raw)
+        table_labels[fn] = labels
+        if not pk_col:
+            continue
+        for i, row in enumerate(rows):
+            pk_val = row.get(pk_col, "")
+            if not pk_val.strip():
+                continue
+            pk_lookup[raw][pk_val] = labels[i]                 # the raw key is the identity
+            pk_lookup[raw].setdefault(pk_val.strip(), labels[i])
+
+    # Pass 2: instances + data values + FK relations (resolved through the lookup).
+    for fn in documents:
+        t = tables.get(fn)
+        if not t or fn not in table_labels:
+            continue
+        raw = t["table_name"]
         cls_name = table_class[raw]
         pk_col = table_pk.get(raw)
-        label_col = _label_col(t)
-        fk_cols = {fc for fc, _, _ in fk_index.get(raw, [])}
         rows = table_rows.get(fn, [])
-        if _is_fact(raw, len(rows)):
-            continue  # schema only — rows belong in a SQL store
-
+        label_col = _label_col(t, rows)
+        fk_cols = {fc for fc, _, _ in fk_index.get(raw, [])}
+        labels = table_labels[fn]
+        src = row_chunks.get(fn, [])
         for i, row in enumerate(rows):
-            name = _instance_label(row, label_col, pk_col, raw, i)
-            chunk_ids = []
-            if chunks:
-                cid = chunks[min(i, len(chunks) - 1)].get("chunk_id", "")
-                if cid:
-                    chunk_ids = [cid]
-            instances.append(Instance(name=name, class_name=cls_name, source_chunks=chunk_ids))
+            name = labels[i]
+            chunk_ids = src[i] if i < len(src) else []
+            instances.append(Instance(name=name, class_name=cls_name, source_chunks=list(chunk_ids)))
 
             for col, val in row.items():
                 if not val or not val.strip() or col in (pk_col, label_col) or col in fk_cols:
@@ -179,17 +189,19 @@ def build_from_tables(
                 data_values.append(DataValue(
                     entity=name, property=col, value=val.strip(),
                     value_type=t.get("column_types", {}).get(col, "xsd:string"),
-                    source_chunks=chunk_ids))
+                    source_chunks=list(chunk_ids)))
 
             for from_col, to_table, _to_col in fk_index.get(raw, []):
-                fk_val = row.get(from_col, "").strip()
+                fk_raw = row.get(from_col, "")
+                fk_val = fk_raw.strip()
                 if not fk_val:
                     continue
                 to_cls = table_class.get(to_table, _camel(to_table))
-                prop = op_by_dr.get((cls_name, to_cls), f"{cls_name}_{from_col}")
-                target = pk_lookup.get(to_table, {}).get(fk_val) or f"{to_table}_{fk_val}"
+                prop = f"{cls_name}_{from_col}"
+                lookup = pk_lookup.get(to_table, {})
+                target = lookup.get(fk_raw) or lookup.get(fk_val) or f"{to_table}_{fk_val}"
                 relations.append(Relation(subject=name, predicate=prop, object=target,
-                                          predicate_type="ObjectProperty", source_chunks=chunk_ids))
+                                          predicate_type="ObjectProperty", source_chunks=list(chunk_ids)))
 
     return concepts, instances, relations, data_values
 
@@ -214,23 +226,81 @@ def _camel(name: str) -> str:
     return "".join(p.capitalize() for p in name.split("_") if p)
 
 
-def _instance_label(row: dict, label_col: str, pk_col: str, raw: str, idx: int) -> str:
-    if label_col and row.get(label_col, "").strip():
-        return row[label_col].strip()
-    if pk_col and row.get(pk_col, "").strip():
-        return row[pk_col].strip()
-    return f"{raw}_{idx}"
+_MAX_LABEL_CHARS = 40       # names are short
+_LABEL_MIN_TEXT = 0.7       # share of values that look like names (not numbers/dates)
+_LABEL_MIN_DISTINCT = 0.6   # share of distinct values; a repeated category (region, dept) is not a name
 
 
-_NAME_PATTERNS = {"name", "이름", "명칭", "title", "label", "description"}
+def _is_code_value(v: str) -> bool:
+    """An identifier code rather than a name: digits with at most a one-letter prefix."""
+    t = (v or "").strip()
+    if not t or not any(ch.isdigit() for ch in t):
+        return False
+    return len([ch for ch in t if ch.isalpha()]) <= 1
 
 
-def _label_col(table: dict) -> str:
+def _label_col(table: dict, rows: list[dict[str, str]] | None = None) -> str:
+    """The column that names a row, judged from the data.
+
+    A declared ``label_column`` wins. Otherwise the first column whose values are
+    mostly text, mostly distinct and not identifier codes; a code-like column is
+    kept only as a fallback. Empty when no column names the rows.
+    """
+    declared = table.get("label_column")
+    if declared and declared in table.get("columns", []):
+        return declared
+
+    def _ok(col: str) -> list[str] | None:
+        vals = [str(r.get(col, "")).strip() for r in (rows or [])]
+        vals = [v for v in vals if v]
+        if len(vals) < 2:
+            return None
+        text = sum(1 for v in vals if not is_value(v) and len(v) <= _MAX_LABEL_CHARS)
+        if text / len(vals) < _LABEL_MIN_TEXT or len(set(vals)) / len(vals) < _LABEL_MIN_DISTINCT:
+            return None
+        return vals
+
+    fallback = ""
     for col in table.get("columns", []):
-        cl = col.lower().replace("_", "")
-        if any(p in cl for p in _NAME_PATTERNS):
+        vals = _ok(col)
+        if vals is None:
+            continue
+        if not fallback:
+            fallback = col
+        if sum(1 for v in vals if _is_code_value(v)) * 2 <= len(vals):
             return col
-    return ""
+    return fallback
+
+
+def _instance_labels(rows: list[dict[str, str]], label_col: str, pk_col: str | None, raw: str) -> list[str]:
+    """One label per row; rows whose labels would collide as IRIs are told apart by their PK (or index)."""
+    base: list[str] = []
+    for idx, row in enumerate(rows):
+        if label_col and row.get(label_col, "").strip():
+            base.append(row[label_col].strip())
+        elif pk_col and row.get(pk_col, "").strip():
+            base.append(row[pk_col].strip())
+        else:
+            base.append(f"{raw}_{idx}")
+    dup = {u for u, n in Counter(safe_uri(b) for b in base).items() if n > 1}
+    if not dup:
+        return base
+    taken = {safe_uri(b) for b in base}
+    next_n: dict[str, int] = defaultdict(int)
+    out: list[str] = []
+    for idx, (row, name) in enumerate(zip(rows, base)):
+        if safe_uri(name) not in dup:
+            out.append(name)
+            continue
+        ident = (row.get(pk_col, "").strip() if pk_col else "") or str(idx)
+        prefix = f"{name}#{ident}"
+        cand = prefix
+        while safe_uri(cand) in taken:
+            next_n[prefix] += 1
+            cand = f"{prefix}#{next_n[prefix]}"
+        taken.add(safe_uri(cand))
+        out.append(cand)
+    return out
 
 
 class _TableHTMLParser(HTMLParser):
@@ -320,13 +390,17 @@ def _header_and_samples(chunks: list[dict]) -> tuple[list[str], list[list[str]],
     return all_rows[0], all_rows[1:], max(total, 1)
 
 
-def _rows_from_chunks(chunks: list[dict], columns: list[str]) -> list[dict[str, str]]:
+def _rows_from_chunks(chunks: list[dict], columns: list[str]) -> tuple[list[dict[str, str]], list[list[str]]]:
+    """Cell rows as column dicts, each with the id of the chunk it came from."""
     rows: list[dict[str, str]] = []
+    src: list[list[str]] = []
     for ch in chunks:
+        cid = ch.get("chunk_id", "")
         for r in _parse_rows(ch.get("chunk_text", "")):
             if len(r) >= len(columns) and r[:len(columns)] != columns:
                 rows.append(dict(zip(columns, r[:len(columns)])))
-    return rows
+                src.append([cid] if cid else [])
+    return rows, src
 
 
 def _infer_column_types(header: list[str], rows: list[list[str]]) -> dict[str, str]:

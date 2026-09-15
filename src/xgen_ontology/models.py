@@ -148,5 +148,9 @@ class BuildReport:
     data_values: int = 0
     renamed: int = 0           # entities/classes/props merged by dedup
     predicates_merged: int = 0
+    folded: int = 0            # name fragments folded back into the name they came from
+    pruned: int = 0            # unlinked common-word entities dropped
     llm_calls: int = 0
+    mode: str = ""             # "basic" | "enrich" | "llm"
+    quality: dict = field(default_factory=dict)   # review_quality() of the finished build
     notes: list[str] = field(default_factory=list)

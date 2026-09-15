@@ -1,10 +1,11 @@
 # xgen-ontology
 
 **Backend-agnostic ontology / knowledge-graph toolkit.** Turn documents or tables
-into a *clean* knowledge graph — extract, resolve, dedup, induce the is-a hierarchy,
-govern predicates, score quality — then **search it with one-shot GraphRAG**.
-**Zero infra** (the whole thing runs on a pure-Python in-memory backend), **zero
-lock-in** (load into *any* SPARQL 1.1 store), **zero hard deps** in the core.
+into a *clean* knowledge graph — extract, dedup, induce the is-a hierarchy, govern
+predicates, score quality — then **search it with one-shot GraphRAG**. **Zero LLM
+calls by default** (structure-based extraction, rule post-build), **zero infra** (the
+whole thing runs on a pure-Python in-memory backend), **zero lock-in** (load into
+*any* SPARQL 1.1 store), **zero hard deps** in the core.
 
 ```python
 from xgen_ontology import build_from_csv
@@ -25,19 +26,24 @@ shown in a graph explorer:
   <img src="assets/ontology-graph.png" alt="An ontology knowledge graph built with xgen-ontology" width="760">
 </p>
 
-Build from prose with any LLM, mix tables and text freely — raw documents are
-**parsed and chunked** for you:
+Documents build **without an LLM too**. The base build reads document *structure*:
+tables become row entities with their column values as attributes and relations,
+prose yields noun-phrase entities, and the hierarchy comes from Hearst patterns
+and from the structure of the names themselves. Mix tables and text freely; raw
+documents are **parsed and chunked** for you:
 
 ```python
 from xgen_ontology import build_from_files, build_from_text, CallableLLM
 
+# zero LLM calls (the default, mode="basic"); pdf/docx/xlsx via the [files] extra
+onto = build_from_files(["policy.pdf", "products.csv"])
+onto.report.llm_calls            # 0
+onto.report.quality["score"]     # graph-reviewer score of the finished build
+
+# an LLM is optional: mode="enrich" adds relations between the extracted entities,
+# mode="llm" is full LLM extraction of schema and instances
 llm = CallableLLM(lambda p, system="": my_model(system, p))     # OpenAI / Anthropic / vLLM / …
-
-# from files on disk (txt/md/html/csv built-in; pdf/docx/xlsx via the [files] extra)
-onto = build_from_files(["policy.pdf", "products.csv"], llm=llm)
-
-# or from a single raw string (auto boundary-aware chunking)
-onto = build_from_text("Rule A applies to Acme Bank since 2020. ...", llm=llm)
+onto = build_from_text("Rule A applies to Acme Bank since 2020. ...", llm=llm, mode="enrich")
 ```
 
 ## Two halves of the lifecycle
@@ -50,14 +56,15 @@ The pipeline is a sequence of independently-importable, backend-agnostic stages:
 |------|--------------|
 | **parse** | extract text from files — txt/md/html/csv built-in (zero-dep), pdf/docx/xlsx via `[files]` |
 | **chunk** | boundary-aware chunking (paragraph→sentence→char) with overlap, stable chunk ids for provenance |
-| **tabular** | table → ontology with **no LLM**: table→Class, FK→ObjectProperty (same-name / normalized-name / value-overlap detection), column→DataProperty, dimension rows→instances; large fact/junction tables stay schema-only |
-| **extract** | one LLM call per chunk batch → schema *and* instances, tagged to source chunks; junk (base64/degenerate) filtered first |
-| **resolve** | entity resolution: fold case/whitespace/unicode + similar surface forms, *guarding* dates/ids and number-conflicting names |
-| **taxonomy** | is-a edges from the text itself, **zero LLM calls**: Hearst patterns ("X, Y 등의 Z" → Z is-a X, Z is-a Y) plus head-noun decomposition of compound class names ("상임감사실" → is-a "감사실"). Off with `hierarchy=False` |
-| **govern** | predicate governance: fold surface variants of a relation, anchor to the schema vocabulary |
-| **dedup** | merge synonymous classes/properties/instances — rule keys, LLM synonym groups, and embedding cosine clusters |
-| **hierarchy** | keep only genuine is-a edges ("being linked is not being a subclass"), break cycles, then SCS context profiles with property inheritance |
-| **quality** | a graph-reviewer score: completeness · integrity · grounding · shape |
+| **tabular** | table files → ontology with **no LLM**: table→Class, FK→ObjectProperty (same-name / normalized-name / value-overlap detection), column→DataProperty, dimension rows→instances (the name column is judged from the data; rows with the same name are told apart by their key); large fact/junction tables and tables with no name column stay schema-only |
+| **deterministic** | documents → ontology with **no LLM** (`mode="basic"`, the default): HTML tables, whitespace row dumps and pipe grids become row entities typed by the subject column's header, with value cells as attributes and entity cells as relations (headers carry across chunk boundaries, unit rows annotate columns, codes/glosses/decorative parentheses are stripped from names); prose yields noun-phrase entities and (entity, attribute, value) facts; a shared head noun promotes to a class; names appearing in more than 30% of chunks are dropped as non-discriminative |
+| **extract** | the LLM paths: `mode="enrich"` asks only for relations between the entities the base build found (choosing from the predicates already in use); `mode="llm"` is full extraction of schema *and* instances per chunk batch, tagged to source chunks. Junk (base64/degenerate) filtered first; unit-notation magnitudes verified against the source; structured-output JSON schema available |
+| **taxonomy** | hierarchy **without an LLM**: Hearst patterns in prose ("X, Y 등의 Z" → Z is-a X, Z is-a Y); then name structure over classes *and* instances: a boundary-aligned head noun is the parent ("상임감사실" → is-a "감사실"; an instance is typed by its head, a name used as a head becomes a class), a code-prefixed spelling folds into its canonical name, a shared leading word links neighbours. Before that, name fragments that never stood alone are folded back into their source name and unlinked everyday words are dropped. Off with `hierarchy=False` |
+| **govern** | predicate governance: strip a subject/object noun glued into the predicate, fold surface variants, anchor to the schema and to predicates already in use; vote relation direction by (subject type, object type) majority; merge predicates that share a stem or whose extension is contained in another's |
+| **dedup** | merge synonymous names — content-morpheme keys for instances (shortest spelling wins), (domain, range, key) groups for properties, LLM synonym groups (`mode="enrich"` only), embedding cosine clusters when an embedder is given |
+| **hierarchy** | keep only genuine is-a edges ("being linked is not being a subclass"), break cycles, repair instances typed by a class of their own name, materialize inherited properties onto subclasses; optional SCS context profiles |
+| **quality** | a graph-reviewer score: completeness · integrity · grounding · shape, recorded on `onto.report.quality` |
+| **resolve** | (off by default) fuzzy entity resolution: fold similar surface forms, *guarding* dates/ids and number-conflicting names |
 | **community** | Louvain modularity clustering (pure Python) |
 | **emit** | Turtle (zero-dep) or OWL/RDF-XML (rdflib) |
 
@@ -113,6 +120,7 @@ Run the demos with no install:
 
 ```bash
 python examples/build_csv.py
+python examples/build_documents.py
 python examples/build_and_search.py
 ```
 
@@ -121,11 +129,17 @@ python examples/build_and_search.py
 - **`dependencies = []`** — the core needs nothing but the standard library. The
   in-memory graph indexes labels with **BM25** (CJK character n-grams, so Korean/CJK
   search works with no morphological analyzer); the Turtle writer is hand-rolled.
-- **English-neutral by default** — no hardcoded language. Korean morphology, name→URI
-  translation and the extraction/synthesis prompts are all pluggable; the defaults
-  assume nothing about your domain or language.
-- **Bring your own everything** — LLM (`generate(prompt, system)`), embedder, morphology,
-  graph store. The bundled `EchoLLM` lets the whole pipeline run with no API key.
+- **No LLM in the loop unless you ask for one** — the base build and the whole
+  post-build are rules over document structure and name structure, so a build is
+  reproducible and costs nothing; `mode="enrich"` / `"llm"` bring a model in for the
+  parts only a model can do (relations stated in prose, free-form schema).
+- **English-neutral architecture, Korean-tuned defaults** — the morphology-aware parts
+  (noun phrases, sentence-fragment detection, head nouns, common words) use the optional
+  `korean` extra and degrade gracefully without it; prompts, name→URI translation and
+  the tokenizer are pluggable.
+- **Bring your own everything** — LLM (`generate(prompt, system)`, optionally
+  `generate_json(prompt, system, schema)` for structured output), embedder, morphology,
+  graph store. The bundled `EchoLLM` lets search run with no API key.
 
 ```
 src/xgen_ontology/
@@ -134,15 +148,16 @@ src/xgen_ontology/
   text.py          # tokenizer + BM25 (CJK n-grams), IRI-safe slugging
   korean.py        # label cleanup + morphology (optional kiwipiepy; degrades gracefully)
   build/
-    parse.py       # file -> text (txt/md/html/csv; pdf/docx/xlsx optional)
-    chunk.py       # boundary-aware chunking
-    tabular.py     # table -> ontology (no LLM)
-    extract.py     # document -> ontology (LLM)
-    resolve.py     # entity resolution
-    taxonomy.py    # is-a induction: Hearst patterns + head-noun decomposition (no LLM)
-    govern.py      # predicate governance
-    dedup.py       # rule + LLM + vector dedup
-    hierarchy.py   # is-a cleaning + SCS inheritance
+    parse.py         # file -> text (txt/md/html/csv; pdf/docx/xlsx optional)
+    chunk.py         # boundary-aware chunking
+    tabular.py       # table file -> ontology (no LLM)
+    deterministic.py # document -> ontology from structure (no LLM): tables, row dumps, prose
+    extract.py       # document -> ontology with an LLM (relations-only enrich / full)
+    resolve.py       # fuzzy entity resolution (off by default)
+    taxonomy.py      # hierarchy without an LLM: Hearst patterns + name structure, fragment folding
+    govern.py        # predicate governance, direction vote, stem / co-extension merge
+    dedup.py         # rule + LLM + vector dedup
+    hierarchy.py     # is-a cleaning, self-typed repair, property inheritance, SCS
     quality.py     # graph-reviewer score
     community.py   # Louvain
     emit.py        # Turtle / OWL

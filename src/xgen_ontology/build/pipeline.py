@@ -1,38 +1,74 @@
-"""OntologyBuilder — orchestrate documents/tables into a clean :class:`Ontology`.
+"""OntologyBuilder: orchestrate documents/tables into a clean :class:`Ontology`.
 
-Stages: input split (table vs text) -> deterministic table build + LLM document
-extraction -> merge -> entity resolution -> hierarchy induction (Hearst patterns +
-head-noun decomposition, zero LLM calls) -> hierarchy clean -> dedup -> hierarchy
-re-clean -> (optional) SCS context profiles. Each stage is independently importable;
-the orchestrator just wires them with injected backends (LLM / morphology / embedder),
-all optional. The CSV path needs no LLM at all.
+The stage order is the production build's, ported without its collection /
+database plumbing:
+
+1. input split: table files -> deterministic schema build; text -> extraction
+2. extraction by ``mode``:
+   * ``"basic"`` (default): :mod:`.deterministic`, **zero LLM calls** -- entities,
+     classes and row facts from document structure, Hearst hierarchy from prose
+   * ``"enrich"``: basic, then an LLM pass that adds relations between the known
+     entities, then LLM synonym folding of the schema
+   * ``"llm"``: full LLM extraction of schema and instances (the pre-0.6 path)
+3. rule post-build: instance-key merge -> predicate merge (stem + co-extension)
+   -> name-fragment folding -> common-word pruning -> hierarchy from name
+   structure (classes *and* instances) -> vector dedup (if an embedder is given)
+   -> self-typed repair -> hierarchy clean -> property inheritance
+4. optional SCS profiles, then a quality review recorded on the report
+
+Each stage is independently importable; the orchestrator only wires them with
+injected backends (LLM / morphology / embedder), all optional.
 """
 from __future__ import annotations
 
 from ..models import BuildReport, Chunk, Concepts, DataValue, Instance, Relation
 from .chunk import chunk_document
 from .dedup import Deduplicator
+from .deterministic import DEFAULT_COMMON_WORD_RANK, extract_deterministic
 from .extract import DocumentExtractor
-from .hierarchy import SCSGenerator, clean_hierarchy
+from .govern import merge_predicates
+from .hierarchy import (
+    SCSGenerator,
+    clean_hierarchy,
+    fix_self_typed_instances,
+    materialize_property_inheritance,
+)
+from .quality import review_quality
 from .resolve import resolve_entities
 from .tabular import TABLE_EXTENSIONS, analyze_tables, build_from_tables
-from .taxonomy import induce_hierarchy
+from .taxonomy import DEFAULT_RELATED_PREDICATE, fold_name_fragments, induce_hierarchy, prune_common_words
+
+MODES = ("basic", "enrich", "llm")
 
 
 class OntologyBuilder:
-    def __init__(self, llm=None, *, morphology=None, embedder=None, domain: str = "",
-                 dedup: bool = True, scs: bool = False, hierarchy: bool = True,
-                 chunk: bool = True, chunk_size: int = 1200, chunk_overlap: int = 150):
+    def __init__(self, llm=None, *, mode: str = "basic", morphology=None, embedder=None,
+                 domain: str = "", dedup: bool = True, scs: bool = False, hierarchy: bool = True,
+                 resolve: bool = False, chunk: bool = True, chunk_size: int = 1200,
+                 chunk_overlap: int = 150, header_patterns=(), max_coverage: float = 0.30,
+                 min_freq: int = 1, common_word_rank: int = DEFAULT_COMMON_WORD_RANK,
+                 related_predicate: str | None = DEFAULT_RELATED_PREDICATE,
+                 unit_scales: dict | None = None):
+        if mode not in MODES:
+            raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
         self.llm = llm
+        self.mode = mode
         self.morphology = morphology
         self.embedder = embedder
         self.domain = domain
         self.dedup = dedup
         self.scs = scs
         self.hierarchy = hierarchy
+        self.resolve = resolve
         self.chunk = chunk
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+        self.header_patterns = tuple(header_patterns or ())
+        self.max_coverage = max_coverage
+        self.min_freq = min_freq
+        self.common_word_rank = common_word_rank
+        self.related_predicate = related_predicate
+        self.unit_scales = unit_scales
 
     def build(self, documents: dict[str, list[dict]]):
         from ..ontology import Ontology  # local import (Ontology imports build.*)
@@ -47,7 +83,12 @@ class OntologyBuilder:
         relations: list[Relation] = []
         data_values: list[DataValue] = []
         report = BuildReport()
+        mode = self.mode if (self.llm is not None or self.mode == "basic") else "basic"
+        if mode != self.mode:
+            report.notes.append(f"no LLM given: mode {self.mode!r} ran as 'basic'")
+        report.mode = mode
 
+        protected: set[str] = set()   # table-built names: deterministic identities, never renamed away
         if table_docs:
             schema = analyze_tables(table_docs)
             c, i, r, dv = build_from_tables(schema, table_docs)
@@ -55,36 +96,84 @@ class OntologyBuilder:
             instances += i
             relations += r
             data_values += dv
+            protected = {cl.name for cl in c.classes if cl.name} | {x.name for x in i if x.name}
 
-        if text_docs and self.llm is not None:
-            extractor = DocumentExtractor(self.llm, domain=self.domain)
-            c, i, r, dv = extractor.extract(text_docs)
-            _merge(concepts, c)
-            instances += i
-            relations += r
-            data_values += dv
-            report.llm_calls += extractor.llm_calls
+        if text_docs:
+            if mode in ("basic", "enrich"):
+                c, i, r, dv = extract_deterministic(
+                    text_docs, min_freq=self.min_freq, max_coverage=self.max_coverage,
+                    header_patterns=self.header_patterns, common_word_rank=self.common_word_rank,
+                    hearst=self.hierarchy)
+                _merge(concepts, c)
+                instances += i
+                relations += r
+                data_values += dv
+            if mode == "enrich":
+                extractor = DocumentExtractor(self.llm, domain=self.domain,
+                                              header_patterns=self.header_patterns)
+                known_preds = list(dict.fromkeys(
+                    [r.predicate for r in relations if r.predicate]
+                    + [op.name for op in concepts.object_properties if op.name]))
+                relations += extractor.extract_relations(
+                    text_docs, known_entities=list(dict.fromkeys(i.name for i in instances if i.name)),
+                    known_predicates=known_preds)
+                report.llm_calls += extractor.llm_calls
+            if mode == "llm":
+                extractor = DocumentExtractor(self.llm, domain=self.domain,
+                                              header_patterns=self.header_patterns,
+                                              unit_scales=self.unit_scales)
+                c, i, r, dv = extractor.extract(text_docs)
+                _merge(concepts, c)
+                instances += i
+                relations += r
+                data_values += dv
+                report.llm_calls += extractor.llm_calls
 
-        resolve_entities(instances, relations, data_values)
+        if self.resolve:
+            resolve_entities(instances, relations, data_values)
+
+        deduper = Deduplicator(self.llm if mode == "enrich" else None, self.morphology, self.embedder)
+        if self.dedup:
+            # Key merge is for extracted names; a table row's label is its identity.
+            rename = {o: n for o, n in deduper._normalize_instances(instances).items()
+                      if o not in protected} if text_docs else {}
+            if rename:
+                Deduplicator._apply_instance(rename, instances, relations, data_values)
+                report.renamed += len(rename)
+            report.predicates_merged += merge_predicates(relations, deduper._norm_key)["merged_predicates"]
+            report.folded += _apply_fold(concepts, instances, data_values, relations)
+            report.pruned += _apply_prune(instances, relations, data_values, self.common_word_rank)
 
         if self.hierarchy:
-            prose_texts = [ch.get("chunk_text", "") for chs in text_docs.values() for ch in chs]
-            induced = induce_hierarchy(concepts, prose_texts, instances)
-            total_edges = induced["hearst_edges_added"] + induced["compound_edges_added"]
-            if total_edges:
+            prose_texts = ([ch.get("chunk_text", "") for chs in text_docs.values() for ch in chs]
+                           if mode == "llm" else None)   # basic/enrich ran Hearst during extraction
+            induced = induce_hierarchy(concepts, prose_texts, instances, relations,
+                                       related_predicate=self.related_predicate,
+                                       header_patterns=self.header_patterns)
+            edges = induced["hearst_edges_added"] + induced["compound_edges_added"]
+            if edges or induced["typed"] or induced["promoted"]:
                 report.notes.append(
-                    f"induced {total_edges} hierarchy edge(s) "
-                    f"({induced['hearst_classes_added']} new class(es) from Hearst patterns)"
-                )
+                    f"name structure: {edges} hierarchy edge(s), {induced['typed']} instance typing(s), "
+                    f"{induced['promoted']} head(s) promoted to class, "
+                    f"{induced['hearst_classes_added']} class(es) from Hearst patterns")
             report.renamed += induced["renamed"]
 
-        clean_hierarchy(concepts)
-
         if self.dedup:
-            deduper = Deduplicator(self.llm, self.morphology, self.embedder)
-            report.renamed = deduper.deduplicate(concepts, instances, relations, data_values)
+            rename = deduper.compute_rename_map(concepts) if mode == "enrich" else {}
             report.llm_calls += deduper.llm_calls
-            clean_hierarchy(concepts)
+            vmap = deduper._vector_dedup([c.name for c in concepts.classes if c.name])
+            vmap.update(deduper._vector_dedup([p.name for p in concepts.object_properties if p.name]))
+            rename = {**vmap, **rename}          # the LLM map wins on conflict
+            rename = {o: n for o, n in rename.items() if o not in protected and o != n}
+            if rename:
+                Deduplicator._apply_class(rename, concepts, instances)
+                Deduplicator._apply_property(rename, concepts, relations, data_values)
+                Deduplicator._apply_instance(rename, instances, relations, data_values)
+                report.renamed += len(rename)
+
+        fix_self_typed_instances(instances, concepts)
+        clean_hierarchy(concepts)
+        materialize_property_inheritance(concepts)
 
         scs_profiles: list[dict] = []
         if self.scs:
@@ -100,9 +189,77 @@ class OntologyBuilder:
         report.instances = len({i.name for i in instances if i.name})
         report.relations = len(relations)
         report.data_values = len(data_values)
+        report.quality = review_quality(concepts, instances, relations, data_values)
 
         return Ontology(concepts=concepts, instances=instances, relations=relations,
                         data_values=data_values, chunks=chunks, scs_profiles=scs_profiles, report=report)
+
+
+def _linked_names(concepts: Concepts, instances: list[Instance], relations: list[Relation]) -> set[str]:
+    """Names that take part in any edge: typing, hierarchy, property declaration or relation."""
+    linked: set[str] = set()
+    for i in instances:
+        if i.name and i.class_name:
+            linked.add(i.name)
+            linked.add(i.class_name)
+    for parent, child in concepts.class_hierarchy:
+        linked.update((parent, child))
+    for c in concepts.classes:
+        if c.parent:
+            linked.update((c.name, c.parent))
+    for op in concepts.object_properties:
+        linked.update(x for x in (op.domain, op.range) if x)
+    for dp in concepts.datatype_properties:
+        if dp.domain:
+            linked.add(dp.domain)
+    for r in relations:
+        linked.update(x for x in (r.subject, r.object) if x)
+    linked.discard("")
+    return linked
+
+
+def _apply_fold(concepts: Concepts, instances: list[Instance], data_values: list[DataValue],
+                relations: list[Relation]) -> int:
+    """Run :func:`fold_name_fragments` and apply it: drop the fragment, move its chunks."""
+    chunks_of: dict[str, set] = {}
+    for i in instances:
+        if i.name:
+            chunks_of.setdefault(i.name, set()).update(c for c in i.source_chunks if c)
+    for c in concepts.classes:
+        if c.name:
+            chunks_of.setdefault(c.name, set()).update(x for x in c.source_chunks if x)
+    names = [c.name for c in concepts.classes if c.name] + [i.name for i in instances if i.name]
+    fold = fold_name_fragments(names, chunks_of, _linked_names(concepts, instances, relations))
+    if not fold:
+        return 0
+    by_inst = {}
+    for i in instances:
+        by_inst.setdefault(i.name, i)
+    by_cls = {c.name: c for c in concepts.classes if c.name}
+    for frag, holder in fold.items():
+        moved = sorted(chunks_of.get(frag, set()))
+        target = by_inst.get(holder) or by_cls.get(holder)
+        if target is not None:
+            for cid in moved:
+                if cid not in target.source_chunks:
+                    target.source_chunks.append(cid)
+    instances[:] = [i for i in instances if i.name not in fold]
+    concepts.classes = [c for c in concepts.classes if c.name not in fold]
+    data_values[:] = [d for d in data_values if d.entity not in fold]
+    return len(fold)
+
+
+def _apply_prune(instances: list[Instance], relations: list[Relation], data_values: list[DataValue],
+                 rank_max: int) -> int:
+    linked = {i.name for i in instances if i.name and i.class_name}
+    for r in relations:
+        linked.update(x for x in (r.subject, r.object) if x)
+    victims = prune_common_words([i.name for i in instances], linked, rank_max=rank_max)
+    if not victims:
+        return 0
+    instances[:] = [i for i in instances if i.name not in victims]
+    data_values[:] = [d for d in data_values if d.entity not in victims]
+    return len(victims)
 
 
 def _ext(name: str) -> str:

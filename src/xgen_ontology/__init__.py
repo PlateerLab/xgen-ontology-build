@@ -4,7 +4,8 @@ Build a clean knowledge graph from documents or tables, then search it with
 one-shot GraphRAG. Zero infra (pure-Python in-memory), zero lock-in (any SPARQL
 store), zero hard deps in the core.
 
-Quickstart — deterministic table -> ontology, no LLM, no infra::
+Quickstart — deterministic table -> ontology, no LLM, no infra (documents build
+the same way: ``build_from_documents({"policy.md": text})`` needs no LLM either)::
 
     from xgen_ontology import build_from_csv
     onto = build_from_csv({
@@ -19,10 +20,30 @@ from .backends.memory import InMemoryGraph, InMemoryGraphSink, InMemoryVector
 from .backends.sparql import SparqlGraph, fuseki
 from .build.chunk import chunk_document, chunk_text
 from .build.community import detect_communities, louvain_communities
-from .build.dedup import Deduplicator, cluster_by_cosine
+from .build.dedup import Deduplicator, cluster_by_cosine, shorten_entity_name
+from .build.deterministic import (
+                                  extract_as_dicts,
+                                  extract_chunk,
+                                  extract_deterministic,
+                                  is_class_name,
+                                  is_common_word,
+                                  is_value,
+)
 from .build.emit import to_owl_xml, to_rdf_triples, to_turtle
-from .build.govern import govern_predicates, normalize_predicate
-from .build.hierarchy import SCSGenerator, clean_hierarchy
+from .build.extract import DocumentExtractor, extraction_schema
+from .build.govern import (
+                           govern_predicates,
+                           merge_predicates,
+                           normalize_predicate,
+                           strip_argument_noun,
+                           vote_relation_direction,
+)
+from .build.hierarchy import (
+                              SCSGenerator,
+                              clean_hierarchy,
+                              fix_self_typed_instances,
+                              materialize_property_inheritance,
+)
 from .build.parse import extract_text, html_to_text, load_documents
 from .build.pipeline import OntologyBuilder
 from .build.quality import review_quality
@@ -30,10 +51,12 @@ from .build.resolve import resolve_entities
 from .build.tabular import analyze_tables, build_from_tables
 from .build.taxonomy import (
                              extract_hearst_pairs,
+                             fold_name_fragments,
                              hearst_hierarchy,
                              induce_head_noun_hierarchy,
                              induce_hierarchy,
                              prose_only,
+                             prune_common_words,
 )
 from .facade import (
                      build_from_csv,
@@ -65,7 +88,7 @@ from .protocols import LLM, Embedder, GraphSink, GraphStore, Morphology, VectorS
 from .search.oneshot import GraphRAG
 from .text import BM25, safe_uri, tokenize
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     # facade
@@ -76,13 +99,16 @@ __all__ = [
     # ingest
     "chunk_text", "chunk_document", "extract_text", "html_to_text", "load_documents",
     # build stages
-    "analyze_tables", "build_from_tables", "resolve_entities", "Deduplicator",
-    "cluster_by_cosine", "govern_predicates", "normalize_predicate", "clean_hierarchy",
-    "SCSGenerator", "review_quality", "detect_communities", "louvain_communities",
-    "to_rdf_triples", "to_turtle", "to_owl_xml",
-    # hierarchy induction (Hearst patterns + head-noun decomposition, zero LLM calls)
+    "analyze_tables", "build_from_tables", "extract_deterministic", "extract_as_dicts",
+    "extract_chunk", "is_value", "is_class_name", "is_common_word", "DocumentExtractor",
+    "extraction_schema", "resolve_entities", "Deduplicator", "cluster_by_cosine",
+    "shorten_entity_name", "govern_predicates", "normalize_predicate", "strip_argument_noun",
+    "vote_relation_direction", "merge_predicates", "clean_hierarchy", "fix_self_typed_instances",
+    "materialize_property_inheritance", "SCSGenerator", "review_quality", "detect_communities",
+    "louvain_communities", "to_rdf_triples", "to_turtle", "to_owl_xml",
+    # hierarchy induction (Hearst patterns + name structure, zero LLM calls)
     "induce_hierarchy", "hearst_hierarchy", "extract_hearst_pairs",
-    "induce_head_noun_hierarchy", "prose_only",
+    "induce_head_noun_hierarchy", "fold_name_fragments", "prune_common_words", "prose_only",
     # Korean text utilities (degrade gracefully with no morphological analyzer)
     "clean_name", "is_sentence_like", "normalize_label", "strip_list_markers",
     # backends

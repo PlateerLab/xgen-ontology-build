@@ -49,7 +49,7 @@ def _stub(prompt, system=""):
 
 def test_build_from_text_chunks_and_extracts():
     text = ("Rule A is a key regulation.\n\n" * 40)   # long enough to chunk
-    onto = build_from_text(text, llm=CallableLLM(_stub), chunk_size=400, chunk_overlap=50)
+    onto = build_from_text(text, llm=CallableLLM(_stub), mode="llm", chunk_size=400, chunk_overlap=50)
     assert len(onto.chunks) > 1                       # it got chunked
     assert any(c.name == "Regulation" for c in onto.concepts.classes)
 
@@ -58,7 +58,7 @@ def test_build_from_files_text_and_table(tmp_path):
     (tmp_path / "policy.txt").write_text("Rule A applies to Acme Bank.", encoding="utf-8")
     (tmp_path / "colors.csv").write_text("color_id,name\n10,Red\n20,Blue", encoding="utf-8")
     onto = build_from_files([str(tmp_path / "policy.txt"), str(tmp_path / "colors.csv")],
-                            llm=CallableLLM(_stub))
+                            llm=CallableLLM(_stub), mode="llm")
     names = {c.name for c in onto.concepts.classes}
     assert "Regulation" in names and "Colors" in names
 
