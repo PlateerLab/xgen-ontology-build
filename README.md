@@ -132,12 +132,14 @@ src/xgen_ontology/
   models.py        # Class/Property/Concepts (T-Box), Instance/Relation/DataValue (A-Box), Node/Chunk
   protocols.py     # LLM / GraphStore / VectorStore / GraphSink / Morphology / Embedder
   text.py          # tokenizer + BM25 (CJK n-grams), IRI-safe slugging
+  korean.py        # label cleanup + morphology (optional kiwipiepy; degrades gracefully)
   build/
     parse.py       # file -> text (txt/md/html/csv; pdf/docx/xlsx optional)
     chunk.py       # boundary-aware chunking
     tabular.py     # table -> ontology (no LLM)
     extract.py     # document -> ontology (LLM)
     resolve.py     # entity resolution
+    taxonomy.py    # is-a induction: Hearst patterns + head-noun decomposition (no LLM)
     govern.py      # predicate governance
     dedup.py       # rule + LLM + vector dedup
     hierarchy.py   # is-a cleaning + SCS inheritance
@@ -163,30 +165,20 @@ examples/  tests/
 
 ## Repository model
 
-[`jinsoo96/js-ontology-build`](https://github.com/jinsoo96/js-ontology-build) is the
-personal source of truth. [`PlateerLab/xgen-ontology-build`](https://github.com/PlateerLab/xgen-ontology-build)
-is the organization mirror and keeps the published Python package name `xgen-ontology`.
+[`PlateerLab/xgen-ontology-build`](https://github.com/PlateerLab/xgen-ontology-build) is the
+source of truth and publishes the Python package `xgen-ontology`. Members of the PlateerLab
+organization commit there directly and cut releases there.
 
-Changes land on `js-ontology-build:main` first. The organization repository runs a
-sync workflow every 15 minutes and on manual dispatch. It accepts only a fast-forward
-from the personal source; it never force-pushes or silently overwrites an independent
-organization commit.
+[`jinsoo96/js-ontology-build`](https://github.com/jinsoo96/js-ontology-build) is a read-only
+mirror. It runs [`sync-from-xgen-ontology-build.yml`](.github/workflows/sync-from-xgen-ontology-build.yml)
+every 15 minutes and on manual dispatch, fast-forwarding from the organization repository with
+the repository's own `GITHUB_TOKEN`; no personal credential is involved, so there is nothing to
+expire.
 
 ## License
 
-**Source-available, all rights reserved.** Copyright (c) 2026 Jinsoo Kim (jinsoo96).
+Source-available. Copyright (c) 2026 Jinsoo Kim.
 
-This is not an open-source license. You may read, clone for personal evaluation, and cite
-this code. You may **not** use it in any product or service, copy it, modify it, redistribute
-it, or build on it without the Owner's prior written permission. The `PlateerLab/xgen-ontology-build`
-mirror and the `xgen-ontology` package on PyPI are redistributions of this repository and carry
-the same terms; installing the package is not a grant of permission.
-
-Releases 0.1.0 through 0.3.0 were published under the MIT License and remain MIT for that
-specific code — this does not apply retroactively. Starting with the release after
-2026-09-09, this repository is source-available only. Full text: [`LICENSE`](LICENSE). To
-request permission, open an issue or email wlstn010203@gmail.com.
-
-소스는 공개돼 있지만 오픈소스가 아닙니다. 열람·인용은 자유이고, 사용·복제·수정·배포·상업적
-이용·파생 작업은 저작권자(김진수)의 사전 서면 허가가 필요합니다. 0.1.0~0.3.0 버전은 그
-버전에 한해 기존 MIT 그대로입니다.
+Members of the PlateerLab organization may use, modify and ship it as part of Plateer products
+(LICENSE §4). For anyone else, reading and citing are fine; any other use needs written
+permission. Releases 0.1.0 through 0.3.0 stay MIT for that specific code. See [`LICENSE`](LICENSE).

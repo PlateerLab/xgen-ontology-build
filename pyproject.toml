@@ -28,9 +28,9 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/jinsoo96/js-ontology-build"
-Repository = "https://github.com/jinsoo96/js-ontology-build"
-Changelog = "https://github.com/jinsoo96/js-ontology-build/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/PlateerLab/xgen-ontology-build"
+Repository = "https://github.com/PlateerLab/xgen-ontology-build"
+Changelog = "https://github.com/PlateerLab/xgen-ontology-build/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # Robust OWL / RDF-XML emit + parse (the zero-dep core emits Turtle on its own).

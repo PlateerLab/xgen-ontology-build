@@ -22,10 +22,11 @@ Python Package Index, does NOT grant anyone permission to use it.
 The Software, including all source code, documentation, benchmark artifacts,
 evaluation data authored for this project, and the names "js-ontology-build",
 "xgen-ontology" and "xgen-ontology-build", is the sole property of the
-copyright holder named above (the "Owner"). The Owner is the single source of
-truth for this Software: the repository jinsoo96/js-ontology-build is the
-origin, and every mirror or redistribution of it is derived from that origin
-and remains subject to this license.
+copyright holder named above (the "Owner"). The repository
+PlateerLab/xgen-ontology-build is the origin of this Software;
+jinsoo96/js-ontology-build is a mirror of it, and every other mirror or
+redistribution is derived from that origin and remains subject to this
+license.
 
 
 2. What you MAY do without asking
@@ -70,20 +71,37 @@ scope and duration and may be revoked by the Owner. The absence of a reply
 is not permission.
 
 
-4. Mirrors and package distributions
+4. Grant to the PlateerLab organization
+---------------------------------------
+This section is the Owner's written permission under Section 3, given to the
+GitHub organization "PlateerLab" (https://github.com/PlateerLab) and to its
+members for as long as they are members.
+
+Within that scope they may use, copy, modify, merge, build, package, deploy
+and distribute the Software, and create derivative works of it, as part of
+the products and services of Plateer Co., Ltd. This includes committing to
+the origin repository, publishing the "xgen-ontology" package, and shipping
+the Software inside Plateer deployments, on-premises or otherwise.
+
+This grant does not make the Software open source and does not extend to
+anyone outside the organization. Redistribution to third parties is allowed
+only as a component of a Plateer product or service, under this same
+license. Section 6 (Contributions) continues to apply to changes made under
+this grant.
+
+
+5. Mirrors and package distributions
 ------------------------------------
-The organization mirror at https://github.com/PlateerLab/xgen-ontology-build
-and the Python package published as "xgen-ontology" are automated
-redistributions of this repository made by, or on behalf of, the Owner for
-the Owner's own purposes. They carry this same license from the version this
-license takes effect on. Installing the package with a package manager is a
-technical act and does not constitute permission under Section 3. Any grant
-of rights to an organization must be made in writing by the Owner personally
-and does not follow from the existence of a mirror, from the Owner's
-employment, or from the package being installable.
+The mirror at https://github.com/jinsoo96/js-ontology-build follows the
+origin repository automatically and carries this same license from the
+version this license takes effect on. The Python package "xgen-ontology" is
+published from the origin repository. Installing the package with a package
+manager is a technical act and does not by itself constitute permission
+under Section 3; permission comes from Section 4 for PlateerLab members and
+from a written grant by the Owner for anyone else.
 
 
-5. Contributions
+6. Contributions
 ----------------
 By submitting any contribution (code, documentation, benchmark data, issue
 text or otherwise) to this Software, you agree that the contribution becomes
@@ -95,14 +113,14 @@ contribution for any purpose, including relicensing. You represent that you
 have the right to make this assignment.
 
 
-6. Termination
+7. Termination
 --------------
 Any breach of Section 3 terminates whatever permission you had under
 Section 2 immediately and automatically. Upon termination you must destroy
 all copies of the Software in your possession.
 
 
-7. No warranty
+8. No warranty
 --------------
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -112,18 +130,18 @@ ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
-8. Governing law
+9. Governing law
 ----------------
 This license is governed by the laws of the Republic of Korea. Any dispute
 arising from it shall be subject to the exclusive jurisdiction of the courts
 of Seoul, Republic of Korea.
 
 
-9. Requesting permission
+10. Requesting permission
 ------------------------
 To request permission for any use not allowed by Section 2, contact the
 Owner at wlstn010203@gmail.com or open an issue at
-https://github.com/jinsoo96/js-ontology-build/issues describing the intended
+https://github.com/PlateerLab/xgen-ontology-build/issues describing the intended
 use.
 
 
