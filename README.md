@@ -245,9 +245,12 @@ organization commit there directly and cut releases there.
 
 [`jinsoo96/js-ontology-build`](https://github.com/jinsoo96/js-ontology-build) is a read-only
 mirror. It runs [`sync-from-xgen-ontology-build.yml`](.github/workflows/sync-from-xgen-ontology-build.yml)
-every 15 minutes and on manual dispatch, fast-forwarding from the organization repository with
-the repository's own `GITHUB_TOKEN`; no personal credential is involved, so there is nothing to
-expire.
+every 15 minutes and on manual dispatch, fast-forwarding from the organization repository. The
+push uses the mirror's `SYNC_TOKEN` secret (the mirror owner's personal access token, `repo` +
+`workflow` scopes) because GitHub does not let a repository's own `GITHUB_TOKEN` push a commit
+that touches `.github/workflows/`; with no secret it falls back to `GITHUB_TOKEN`, which is
+enough until the origin next changes its CI. The organization side has no such dependency: the
+origin never pulls from the mirror.
 
 ## License
 

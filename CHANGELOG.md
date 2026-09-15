@@ -9,6 +9,12 @@
 - Lazy-load/deprecate legacy search entry points while preserving their compatibility.
 - Add independent build/import tests and a producer fixture for retrieval conformance.
 
+# Unreleased
+
+- Mirror sync (`sync-from-xgen-ontology-build.yml`) pushes with the mirror's `SYNC_TOKEN`
+  secret when set: `GITHUB_TOKEN` cannot push a commit that touches `.github/workflows/`,
+  so the mirror had stalled at the first origin commit that changed CI.
+
 # 0.8.0 (2026-09-15)
 
 - **`backends.postgres.PgGraph`** (new) -- the production graph tables
