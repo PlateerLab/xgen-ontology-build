@@ -1,3 +1,25 @@
+# 0.8.0 (2026-09-15)
+
+- **`backends.postgres.PgGraph`** (new) -- the production graph tables
+  (`ontology_nodes`, `ontology_edges`, `ontology_node_chunks`,
+  `ontology_enriched_chunks`) over any DB-API connection, no driver imported.
+  `write(onto, replace=)` stores a build (rows identical to the production loader's
+  on a 16,418-node build: URIs, kinds, edge kinds, attributes, chunk links),
+  `load()` brings a stored collection back into an `Ontology` for
+  `OntologyBuilder.extend`, `mark_enriched` / `enriched_chunk_ids` carry the enrich
+  baseline, and the `GraphStore` protocol (`search_labels`, `class_instances`,
+  `neighbors`, `count_class`, `get_node`) runs the one-shot search straight on the
+  tables. `ensure_schema()` creates the tables where the product has not
+  (PostgreSQL DDL; `dialect="sqlite"` for tests). `graph_rows(onto)` exposes the row
+  shape. Optional extra `postgres` (psycopg).
+- **`OntologyBuilder(progress=fn)`** -- `fn(stage, detail)` per pipeline stage
+  (`start / tables / extract / enrich / llm / dedup / hierarchy / finalize / done`),
+  the hook an application drives its job table from. Job and session bookkeeping
+  itself stays out of the library.
+- **Removed `SCSGenerator`**, the `scs=` flag and `Ontology.scs_profiles`: the
+  context-profile generator was retired in the product (no caller left) and was off
+  by default here since 0.1.0.
+
 # 0.7.0 (2026-09-15)
 
 **Everything that was still only in the product is now in the library.** Incremental

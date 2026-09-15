@@ -15,7 +15,11 @@ database plumbing:
    structure (classes *and* instances) -> vector dedup (if an embedder is given)
    -> self-typed repair -> hierarchy clean -> property inheritance
    -> graph normalization (the store-loading rules)
-4. optional SCS profiles, then a quality review recorded on the report
+4. a quality review recorded on the report
+
+Pass ``progress=callable`` to be told each stage (``progress(stage, detail)``); the
+stages are start / tables / extract / enrich / llm / dedup / hierarchy / finalize /
+done. Job and session bookkeeping is the application's: drive it from that callback.
 
 :meth:`OntologyBuilder.extend` runs the same pipeline incrementally over the
 chunks an existing ontology has not seen. Each stage is independently importable;
@@ -32,12 +36,7 @@ from .dictionary import TermDictionary
 from .extract import DocumentExtractor
 from .finalize import normalize_graph
 from .govern import merge_predicates
-from .hierarchy import (
-    SCSGenerator,
-    clean_hierarchy,
-    fix_self_typed_instances,
-    materialize_property_inheritance,
-)
+from .hierarchy import clean_hierarchy, fix_self_typed_instances, materialize_property_inheritance
 from .quality import review_quality
 from .resolve import resolve_entities
 from .tabular import TABLE_EXTENSIONS, analyze_tables, build_from_tables
@@ -48,12 +47,13 @@ MODES = ("basic", "enrich", "llm")
 
 class OntologyBuilder:
     def __init__(self, llm=None, *, mode: str = "basic", morphology=None, embedder=None,
-                 domain: str = "", dedup: bool = True, scs: bool = False, hierarchy: bool = True,
+                 domain: str = "", dedup: bool = True, hierarchy: bool = True,
                  resolve: bool = False, chunk: bool = True, chunk_size: int = 1200,
                  chunk_overlap: int = 150, header_patterns=(), max_coverage: float = 0.30,
                  min_freq: int = 1, common_word_rank: int = DEFAULT_COMMON_WORD_RANK,
                  related_predicate: str | None = DEFAULT_RELATED_PREDICATE,
-                 unit_scales: dict | None = None, dictionary: TermDictionary | None = None):
+                 unit_scales: dict | None = None, dictionary: TermDictionary | None = None,
+                 progress=None):
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
         self.llm = llm
@@ -62,7 +62,6 @@ class OntologyBuilder:
         self.embedder = embedder
         self.domain = domain
         self.dedup = dedup
-        self.scs = scs
         self.hierarchy = hierarchy
         self.resolve = resolve
         self.chunk = chunk
@@ -75,6 +74,15 @@ class OntologyBuilder:
         self.related_predicate = related_predicate
         self.unit_scales = unit_scales
         self.dictionary = dictionary
+        self.progress = progress
+
+    def _tick(self, stage: str, **detail) -> None:
+        """Report a pipeline stage to ``progress(stage, detail)``; an application drives its own job state from it."""
+        if self.progress is not None:
+            try:
+                self.progress(stage, detail)
+            except Exception:
+                pass
 
     # ── entry points ──
 
@@ -126,8 +134,11 @@ class OntologyBuilder:
         if incremental and not new_docs and mode != "enrich":
             report.notes.append("no new chunks: nothing to extract")
 
+        self._tick("start", mode=mode, incremental=incremental, new_chunks=sum(len(v) for v in new_docs.values()),
+                   corpus_chunks=corpus_total)
         protected: set[str] = set()   # table-built names: deterministic identities, never renamed away
         if table_docs:
+            self._tick("tables", documents=len(table_docs))
             schema = analyze_tables(table_docs)
             c, i, r, dv = build_from_tables(schema, table_docs)
             _merge(concepts, c)
@@ -137,6 +148,7 @@ class OntologyBuilder:
             protected = {cl.name for cl in c.classes if cl.name} | {x.name for x in i if x.name}
 
         if text_docs and mode in ("basic", "enrich"):
+            self._tick("extract", documents=len(text_docs), chunks=sum(len(v) for v in text_docs.values()))
             c, i, r, dv = extract_deterministic(
                 text_docs, min_freq=self.min_freq, max_coverage=self.max_coverage,
                 corpus_chunks=corpus_total, header_patterns=self.header_patterns,
@@ -152,6 +164,7 @@ class OntologyBuilder:
                     if _ext(n) not in TABLE_EXTENSIONS}
             todo = {n: chs for n, chs in todo.items() if chs}
             if todo:
+                self._tick("enrich", chunks=sum(len(v) for v in todo.values()))
                 extractor = DocumentExtractor(self.llm, domain=self.domain,
                                               header_patterns=self.header_patterns)
                 known_preds = list(dict.fromkeys(
@@ -163,6 +176,7 @@ class OntologyBuilder:
                 report.llm_calls += extractor.llm_calls
                 onto.enriched_chunks = sorted(done | {ch["chunk_id"] for chs in todo.values() for ch in chs})
         if text_docs and mode == "llm":
+            self._tick("llm", chunks=sum(len(v) for v in text_docs.values()))
             extractor = DocumentExtractor(self.llm, domain=self.domain,
                                           header_patterns=self.header_patterns,
                                           unit_scales=self.unit_scales)
@@ -180,6 +194,7 @@ class OntologyBuilder:
 
         deduper = Deduplicator(self.llm if mode == "enrich" else None, self.morphology, self.embedder)
         if self.dedup:
+            self._tick("dedup", instances=len(instances), relations=len(relations))
             # Key merge is for extracted names; a table row's label is its identity.
             rename = {o: n for o, n in deduper._normalize_instances(instances).items()
                       if o not in protected} if (text_docs or incremental) else {}
@@ -191,6 +206,7 @@ class OntologyBuilder:
             report.pruned += _apply_prune(instances, relations, data_values, self.common_word_rank)
 
         if self.hierarchy:
+            self._tick("hierarchy", classes=len(concepts.classes), instances=len(instances))
             prose_texts = ([ch.get("chunk_text", "") for chs in text_docs.values() for ch in chs]
                            if mode == "llm" else None)   # basic/enrich ran Hearst during extraction
             new_names = None
@@ -220,6 +236,7 @@ class OntologyBuilder:
                 Deduplicator._apply_instance(rename, instances, relations, data_values)
                 report.renamed += len(rename)
 
+        self._tick("finalize")
         fix_self_typed_instances(instances, concepts)
         clean_hierarchy(concepts)
         materialize_property_inheritance(concepts)
@@ -227,11 +244,6 @@ class OntologyBuilder:
             concepts, instances, relations, data_values,
             structural_predicates=(self.related_predicate,) if self.related_predicate else ())
         clean_hierarchy(concepts)
-
-        if self.scs:
-            gen = SCSGenerator(self.llm)
-            onto.scs_profiles = gen.generate_profiles(concepts)
-            report.llm_calls += gen.llm_calls
 
         onto.chunks = _extend_chunks(onto.chunks, documents, instances)
 
@@ -244,6 +256,8 @@ class OntologyBuilder:
         report.chunks = len(onto.chunks)
         report.quality = review_quality(concepts, instances, relations, data_values)
         onto.report = report
+        self._tick("done", classes=report.classes, instances=report.instances, relations=report.relations,
+                   quality=report.quality.get("score"))
         return onto
 
 

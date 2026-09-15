@@ -1,6 +1,5 @@
 from xgen_ontology import clean_hierarchy, louvain_communities, review_quality, to_turtle
 from xgen_ontology.build.emit import to_rdf_triples
-from xgen_ontology.build.hierarchy import SCSGenerator
 from xgen_ontology.models import Class, Concepts, DataProperty, DataValue, Instance, ObjectProperty, Relation
 
 
@@ -27,17 +26,6 @@ def test_clean_hierarchy_drops_property_parent_and_cycles():
     assert ("Animal", "Dog") in h          # real is-a kept
     assert ("livesIn", "Cat") not in h     # property-as-parent dropped
     assert ("Dog", "Animal") not in h      # cycle edge dropped
-
-
-def test_scs_inherits_properties():
-    concepts = Concepts(
-        classes=[Class("Animal"), Class("Dog", parent="Animal")],
-        datatype_properties=[DataProperty("legs", "Animal", "xsd:integer")],
-        class_hierarchy=[("Animal", "Dog")],
-    )
-    profiles = {p["class_name"]: p for p in SCSGenerator().generate_profiles(concepts)}
-    inherited = {i["name"] for i in profiles["Dog"]["inherited_properties"]}
-    assert "legs" in inherited
 
 
 def test_quality_flags_dangling_and_completeness():

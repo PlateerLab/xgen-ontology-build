@@ -17,6 +17,7 @@ the same way: ``build_from_documents({"policy.md": text})`` needs no LLM either)
     onto.to_turtle()                                      # serialize to RDF
 """
 from .backends.memory import InMemoryGraph, InMemoryGraphSink, InMemoryVector
+from .backends.postgres import PgGraph, graph_rows
 from .backends.sparql import SparqlGraph, fuseki
 from .build.chunk import chunk_document, chunk_text
 from .build.community import detect_communities, louvain_communities
@@ -41,10 +42,9 @@ from .build.govern import (
                                   vote_relation_direction,
 )
 from .build.hierarchy import (
-                                  SCSGenerator,
-                                  clean_hierarchy,
-                                  fix_self_typed_instances,
-                                  materialize_property_inheritance,
+    clean_hierarchy,
+    fix_self_typed_instances,
+    materialize_property_inheritance,
 )
 from .build.parse import extract_text, html_to_text, load_documents
 from .build.pipeline import OntologyBuilder, unbuilt_chunks
@@ -91,7 +91,7 @@ from .protocols import LLM, Embedder, GraphSink, GraphStore, Morphology, VectorS
 from .search.oneshot import GraphRAG
 from .text import BM25, safe_uri, tokenize
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 __all__ = [
     # facade
@@ -108,7 +108,7 @@ __all__ = [
     "extraction_schema", "resolve_entities", "Deduplicator", "cluster_by_cosine",
     "shorten_entity_name", "govern_predicates", "normalize_predicate", "strip_argument_noun",
     "vote_relation_direction", "merge_predicates", "clean_hierarchy", "fix_self_typed_instances",
-    "materialize_property_inheritance", "SCSGenerator", "review_quality", "detect_communities",
+    "materialize_property_inheritance", "review_quality", "detect_communities",
     "louvain_communities", "normalize_graph", "translate_names", "clean_korean_name",
     "TermDictionary", "Term", "to_rdf_triples", "to_turtle", "to_owl_xml",
     # hierarchy induction (Hearst patterns + name structure, zero LLM calls)
@@ -117,7 +117,7 @@ __all__ = [
     # Korean text utilities (degrade gracefully with no morphological analyzer)
     "clean_name", "is_sentence_like", "normalize_label", "strip_list_markers",
     # backends
-    "InMemoryGraph", "InMemoryVector", "InMemoryGraphSink", "SparqlGraph", "fuseki",
+    "InMemoryGraph", "InMemoryVector", "InMemoryGraphSink", "SparqlGraph", "fuseki", "PgGraph", "graph_rows",
     # llm
     "EchoLLM", "CallableLLM",
     # models

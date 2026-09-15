@@ -17,11 +17,12 @@ from .ontology import Ontology
 
 
 def build_from_documents(documents, llm=None, *, mode: str = "basic", morphology=None,
-                         embedder=None, domain: str = "", dedup: bool = True, scs: bool = False,
+                         embedder=None, domain: str = "", dedup: bool = True,
                          hierarchy: bool = True, resolve: bool = False, chunk: bool = True,
                          chunk_size: int = 1200, chunk_overlap: int = 150,
                          header_patterns=(), unit_scales: dict | None = None,
-                         related_predicate: str | None = "관련", dictionary=None) -> Ontology:
+                         related_predicate: str | None = "관련", dictionary=None,
+                         progress=None) -> Ontology:
     """Build an ontology from text (and/or table) documents.
 
     ``documents`` = ``{name: text}`` or ``{name: [chunk, ...]}``. Raw prose strings
@@ -39,10 +40,11 @@ def build_from_documents(documents, llm=None, *, mode: str = "basic", morphology
     ``dictionary`` (:class:`~xgen_ontology.TermDictionary`) canonicalizes aliases.
     Add documents later with ``OntologyBuilder(...).extend(onto, documents)``."""
     return OntologyBuilder(llm, mode=mode, morphology=morphology, embedder=embedder, domain=domain,
-                           dedup=dedup, scs=scs, hierarchy=hierarchy, resolve=resolve, chunk=chunk,
+                           dedup=dedup, hierarchy=hierarchy, resolve=resolve, chunk=chunk,
                            chunk_size=chunk_size, chunk_overlap=chunk_overlap,
                            header_patterns=header_patterns, unit_scales=unit_scales,
-                           related_predicate=related_predicate, dictionary=dictionary).build(documents)
+                           related_predicate=related_predicate, dictionary=dictionary,
+                           progress=progress).build(documents)
 
 
 def build_from_text(text: str, *, name: str = "document.txt", llm=None, **kwargs) -> Ontology:

@@ -62,7 +62,7 @@ The pipeline is a sequence of independently-importable, backend-agnostic stages:
 | **taxonomy** | hierarchy **without an LLM**: Hearst patterns in prose ("X, Y 등의 Z" → Z is-a X, Z is-a Y); then name structure over classes *and* instances: a boundary-aligned head noun is the parent ("상임감사실" → is-a "감사실"; an instance is typed by its head, a name used as a head becomes a class), a code-prefixed spelling folds into its canonical name, a shared leading word links neighbours. Before that, name fragments that never stood alone are folded back into their source name and unlinked everyday words are dropped. Off with `hierarchy=False` |
 | **govern** | predicate governance: strip a subject/object noun glued into the predicate, fold surface variants, anchor to the schema and to predicates already in use; vote relation direction by (subject type, object type) majority; merge predicates that share a stem or whose extension is contained in another's |
 | **dedup** | merge synonymous names — content-morpheme keys for instances (shortest spelling wins), (domain, range, key) groups for properties, LLM synonym groups (`mode="enrich"` only), embedding cosine clusters when an embedder is given |
-| **hierarchy** | keep only genuine is-a edges ("being linked is not being a subclass"), break cycles, repair instances typed by a class of their own name, materialize inherited properties onto subclasses; optional SCS context profiles |
+| **hierarchy** | keep only genuine is-a edges ("being linked is not being a subclass"), break cycles, repair instances typed by a class of their own name, materialize inherited properties onto subclasses |
 | **normalize** | the store-loading rules: a class must look like a class name; a relation named with graph vocabulary (`type`, `instanceOf`, `subClassOf`, `sameAs`) is a typing statement; a relation whose predicate is a declared datatype property or whose object is a value is an attribute; a subject that is a value is dropped; anything referenced is declared (no dangling endpoints) |
 | **quality** | a graph-reviewer score: completeness · integrity · grounding · shape, recorded on `onto.report.quality` |
 | **resolve** | (off by default) fuzzy entity resolution: fold similar surface forms, *guarding* dates/ids and number-conflicting names |
@@ -134,6 +134,30 @@ onto.search("…")                                  # or search a remote store v
 `SparqlGraph` is stdlib-only (urllib) and uses portable `FILTER(CONTAINS(...))`, so
 it works on **any** SPARQL 1.1 endpoint — not just jena-text.
 
+The production system keeps its graph in PostgreSQL (`ontology_nodes` /
+`ontology_edges` / `ontology_node_chunks`). `PgGraph` speaks that schema over any
+DB-API connection (psycopg 2/3; sqlite in the tests), so a library build lands where
+the product reads it, and a stored graph can be searched or extended:
+
+```python
+import psycopg
+from xgen_ontology import OntologyBuilder, PgGraph
+
+pg = PgGraph(psycopg.connect(DSN, autocommit=True), collection_id="col-1")
+pg.ensure_schema()                        # no-op where the product already created the tables
+pg.write(OntologyBuilder().build(docs))   # rows identical to the product's own loader
+
+onto = pg.load()                          # back into build models (chunk ids only)
+OntologyBuilder().extend(onto, more_docs) # incremental
+pg.write(onto, replace=False)             # append; a node seen again merges its attributes
+
+onto.search(...)                          # or GraphRAG(pg, vector_store, llm) straight on the tables
+```
+
+Job and session bookkeeping is the application's; `OntologyBuilder(progress=fn)`
+reports each stage (`start / tables / extract / enrich / llm / dedup / hierarchy /
+finalize / done`) so a job table can be driven from it.
+
 ## Install
 
 ```bash
@@ -142,6 +166,7 @@ pip install "xgen-ontology[files]"        # + pypdf / python-docx / openpyxl (pa
 pip install "xgen-ontology[rdf]"          # + rdflib (OWL / RDF-XML emit & parse)
 pip install "xgen-ontology[korean]"       # + kiwipiepy (Korean morphological dedup)
 pip install "xgen-ontology[vector]"       # + qdrant-client (embedding adapters)
+pip install "xgen-ontology[postgres]"     # + psycopg (PgGraph takes any DB-API connection)
 ```
 
 Run the demos with no install:
@@ -185,7 +210,7 @@ src/xgen_ontology/
     taxonomy.py      # hierarchy without an LLM: Hearst patterns + name structure, fragment folding
     govern.py        # predicate governance, direction vote, stem / co-extension merge
     dedup.py         # rule + LLM + vector dedup
-    hierarchy.py     # is-a cleaning, self-typed repair, property inheritance, SCS
+    hierarchy.py     # is-a cleaning, self-typed repair, property inheritance
     finalize.py      # graph normalization (the store-loading rules)
     dictionary.py    # TermDictionary: alias -> canonical at build / query / indexing time
     translate.py     # LLM translation of names to English IRI local names
@@ -196,6 +221,7 @@ src/xgen_ontology/
   backends/
     memory.py      # InMemoryGraph / InMemoryVector / InMemoryGraphSink (zero infra)
     sparql.py      # SparqlGraph — any SPARQL 1.1 store (read + write)
+    postgres.py    # PgGraph — the XGEN graph tables: write, search, load for incremental builds
   search/          # fusion + one-shot GraphRAG
   ontology.py      # Ontology — the hub (search / emit / push / quality / communities)
   facade.py        # build_from_csv / build_from_documents / build_from_triples

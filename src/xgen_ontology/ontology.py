@@ -34,7 +34,6 @@ class Ontology:
     chunks: list[Chunk] = field(default_factory=list)
     enriched_chunks: list[str] = field(default_factory=list)   # chunk ids the LLM relation pass covered
     translations: dict[str, str] = field(default_factory=dict)
-    scs_profiles: list[dict] = field(default_factory=list)
     report: BuildReport = field(default_factory=BuildReport)
 
     # ── search ──
