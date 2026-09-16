@@ -1,3 +1,10 @@
+# 0.9.1 (2026-09-17)
+
+- Normalize UTF-16 surrogate pairs from document parsers and model JSON into
+  valid Unicode scalar values throughout the portable knowledge contract.
+- Replace isolated malformed surrogates with U+FFFD so one damaged character
+  cannot abort an otherwise valid knowledge build or snapshot publication.
+
 # 0.9.0 (2026-09-15)
 
 - Add `build_knowledge` and `export_knowledge` using the current production build pipeline with explicit immutable source identities.

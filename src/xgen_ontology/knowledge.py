@@ -23,10 +23,57 @@ class SnapshotConflict(ContractError):
     """A writer or reader used a different snapshot than the one required."""
 
 
+def normalize_unicode(value: Any) -> Any:
+    """Return JSON data containing only Unicode scalar values.
+
+    Some document parsers and JSON-producing models expose UTF-16 surrogate
+    pairs as two Python characters.  Python's UTF-8 encoder rejects those raw
+    code units even when they form a valid pair.  Compose valid pairs into the
+    intended code point and replace isolated, malformed surrogates with U+FFFD.
+    The walk includes dictionary keys and extension payloads because both are
+    part of the portable knowledge contract.
+    """
+    if isinstance(value, str):
+        result = []
+        index = 0
+        while index < len(value):
+            code = ord(value[index])
+            if 0xD800 <= code <= 0xDBFF:
+                if index + 1 < len(value):
+                    low = ord(value[index + 1])
+                    if 0xDC00 <= low <= 0xDFFF:
+                        result.append(chr(0x10000 + ((code - 0xD800) << 10) + low - 0xDC00))
+                        index += 2
+                        continue
+                result.append("\uFFFD")
+            elif 0xDC00 <= code <= 0xDFFF:
+                result.append("\uFFFD")
+            else:
+                result.append(value[index])
+            index += 1
+        return "".join(result)
+    if isinstance(value, dict):
+        normalized = {}
+        for key, item in value.items():
+            clean_key = normalize_unicode(key)
+            if clean_key in normalized:
+                raise ContractError("Unicode normalization produced a duplicate object key")
+            normalized[clean_key] = normalize_unicode(item)
+        return normalized
+    if isinstance(value, tuple):
+        return tuple(normalize_unicode(item) for item in value)
+    if isinstance(value, list):
+        return [normalize_unicode(item) for item in value]
+    return value
+
+
 def canonical_json(value: Any) -> str:
     try:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    except (TypeError, ValueError) as exc:
+        rendered = json.dumps(normalize_unicode(value), ensure_ascii=False, sort_keys=True,
+                              separators=(",", ":"), allow_nan=False)
+        rendered.encode("utf-8")  # portable means every consumer can encode it
+        return rendered
+    except (TypeError, ValueError, UnicodeError) as exc:
         raise ContractError(f"not portable JSON: {exc}") from exc
 
 
