@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xgen-ontology"
-version = "0.9.0"
+version = "0.9.1"
 description = "Independent knowledge-graph builder with portable hierarchy, source provenance, embeddings and graph exchange. Zero infra, any graph DB."
 readme = "README.md"
 requires-python = ">=3.10"
