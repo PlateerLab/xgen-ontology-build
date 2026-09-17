@@ -26,6 +26,24 @@ shown in a graph explorer:
 
 <p align="center">
   <img src="assets/ontology-graph.png" alt="An ontology knowledge graph built with xgen-ontology" width="760">
+
+### Incremental resource graphs
+
+Large file stores should build one immutable resource revision at a time. The
+fragment contract keeps graph construction independent from hierarchy and
+embedding projections, while assembly retracts deleted revisions without
+rebuilding unchanged files.
+
+```python
+from xgen_ontology import build_resource_fragment, assemble_resource_fragments
+
+fragment = build_resource_fragment(one_file_bundle, snapshot_id="fragment:file-7:r3")
+snapshot = assemble_resource_fragments(
+    current_source_bundle,
+    [fragment, *unchanged_fragments],
+    snapshot_id="graph:42",
+)
+```
 </p>
 
 Documents build **without an LLM too**. The base build reads document *structure*:
