@@ -60,6 +60,124 @@ def build_knowledge(
     return export_knowledge(ontology, source, snapshot_id=snapshot_id)
 
 
+def build_resource_fragment(
+    source: KnowledgeBundle | dict, *, snapshot_id: str, builder: OntologyBuilder | None = None,
+    context=None,
+) -> KnowledgeBundle:
+    """Build the graph projection for one immutable resource revision.
+
+    A fragment is deliberately free of embeddings.  It can therefore be built,
+    retried and discarded independently from the vector projection.  Directory
+    ancestors may be present to keep the resource path meaningful, but exactly
+    one non-directory resource revision must own all source chunks.
+    """
+    source = KnowledgeBundle.from_dict(source.to_dict() if hasattr(source, "to_dict") else source)
+    files = [resource for resource in source.resources if resource.kind != "directory"]
+    if len(files) != 1:
+        raise ContractError("a resource fragment requires exactly one non-directory resource")
+    resource = files[0]
+    if any(chunk.resource_id != resource.id or chunk.revision != resource.revision for chunk in source.chunks):
+        raise ContractError("fragment chunks must belong to the single resource revision")
+    graph_source = replace(
+        source,
+        profiles=(),
+        embeddings=(),
+        components=tuple(component for component in source.components if component != "embeddings"),
+    )
+    built = build_knowledge(graph_source, snapshot_id=snapshot_id, builder=builder, context=context)
+    extensions = dict(built.extensions)
+    extensions["xgen_ontology.fragment"] = {
+        "resource_id": resource.id,
+        "revision": resource.revision,
+        "source_snapshot": source.snapshot_id,
+    }
+    return replace(built, extensions=extensions).validate()
+
+
+def assemble_resource_fragments(
+    source: KnowledgeBundle | dict, fragments, *, snapshot_id: str,
+) -> KnowledgeBundle:
+    """Assemble current resource fragments into one deterministic graph snapshot.
+
+    ``source`` owns hierarchy, chunks and optional embeddings.  Fragments own
+    only graph records.  Omitting a deleted or replaced resource's fragment is
+    the retraction mechanism, so assembly never needs the deleted file bytes and
+    never rebuilds unaffected resources.
+    """
+    source = KnowledgeBundle.from_dict(source.to_dict() if hasattr(source, "to_dict") else source)
+    resources = {resource.id: resource for resource in source.resources}
+    chunks = {chunk.id: chunk for chunk in source.chunks}
+    evidence = {}
+    entities = {}
+    facts = {}
+    seen_revisions = set()
+
+    def compatible(existing, incoming, fields, name):
+        if any(getattr(existing, field) != getattr(incoming, field) for field in fields):
+            raise ContractError(f"conflicting {name} record: {incoming.id}")
+
+    for raw in fragments:
+        fragment = KnowledgeBundle.from_dict(raw.to_dict() if hasattr(raw, "to_dict") else raw)
+        if fragment.corpus_id != source.corpus_id:
+            raise ContractError("fragment corpus does not match source corpus")
+        metadata = fragment.extensions.get("xgen_ontology.fragment")
+        if not isinstance(metadata, dict):
+            raise ContractError("bundle is not a resource fragment")
+        resource_id, revision = metadata.get("resource_id"), metadata.get("revision")
+        current = resources.get(resource_id)
+        if current is None or current.revision != revision:
+            raise ContractError(f"fragment does not reference a current resource revision: {resource_id}")
+        key = (resource_id, revision)
+        if key in seen_revisions:
+            raise ContractError(f"duplicate resource fragment: {resource_id}@{revision}")
+        seen_revisions.add(key)
+        if any(item.chunk_id not in chunks for item in fragment.evidence):
+            raise ContractError(f"fragment evidence is absent from source: {resource_id}@{revision}")
+
+        for item in fragment.evidence:
+            if item.id in evidence:
+                compatible(evidence[item.id], item, ("chunk_id", "locator", "extensions"), "evidence")
+            else:
+                evidence[item.id] = item
+        for item in fragment.entities:
+            if item.id in entities:
+                existing = entities[item.id]
+                compatible(existing, item, ("label", "kind", "extensions"), "entity")
+                entities[item.id] = replace(
+                    existing, evidence_ids=tuple(sorted(set(existing.evidence_ids) | set(item.evidence_ids)))
+                )
+            else:
+                entities[item.id] = item
+        for item in fragment.facts:
+            if item.id in facts:
+                existing = facts[item.id]
+                compatible(existing, item, (
+                    "subject_id", "predicate", "object_id", "literal", "datatype", "assertion", "extensions",
+                ), "fact")
+                facts[item.id] = replace(
+                    existing, evidence_ids=tuple(sorted(set(existing.evidence_ids) | set(item.evidence_ids)))
+                )
+            else:
+                facts[item.id] = item
+
+    extensions = dict(source.extensions)
+    extensions["xgen_ontology.assembly"] = {
+        "fragment_count": len(seen_revisions),
+        "resource_revisions": [list(key) for key in sorted(seen_revisions)],
+    }
+    components = set(source.components)
+    components.add("graph")
+    return replace(
+        source,
+        snapshot_id=snapshot_id,
+        evidence=tuple(evidence[key] for key in sorted(evidence)),
+        entities=tuple(entities[key] for key in sorted(entities)),
+        facts=tuple(facts[key] for key in sorted(facts)),
+        components=tuple(sorted(components)),
+        extensions=extensions,
+    ).validate()
+
+
 def export_knowledge(ontology, source: KnowledgeBundle | dict, *, snapshot_id: str) -> KnowledgeBundle:
     """Convert a built ontology using exact caller-owned source identities.
 

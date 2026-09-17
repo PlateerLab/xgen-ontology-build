@@ -243,6 +243,14 @@ path after real-corpus A/B runs (cloud vs local models on identical input).
 
 # Changelog
 
+## 0.10.0
+
+- Add `build_resource_fragment` for bounded, per-resource ontology builds.
+- Add `assemble_resource_fragments` for deterministic graph publication and
+  retraction by omission of deleted or replaced resource revisions.
+- Keep graph fragments independent from embedding vectors while preserving
+  exact source evidence and immutable revision identities.
+
 ## 0.2.0
 
 - **Ingestion** so it works end-to-end from raw documents:

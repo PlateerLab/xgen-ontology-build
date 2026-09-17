@@ -3,7 +3,13 @@ from dataclasses import replace
 
 import pytest
 
-from xgen_ontology import OntologyBuilder, build_knowledge, export_knowledge
+from xgen_ontology import (
+    OntologyBuilder,
+    assemble_resource_fragments,
+    build_knowledge,
+    build_resource_fragment,
+    export_knowledge,
+)
 from xgen_ontology.knowledge import (
     ContractError,
     KnowledgeBundle,
@@ -81,3 +87,37 @@ def test_export_rejects_wrong_source_version():
     onto = OntologyBuilder().build({"colors.csv": [{"chunk_id": "colors:v1", "chunk_text": "changed"}]})
     with pytest.raises(ContractError, match="absent/different"):
         export_knowledge(onto, source(), snapshot_id="g")
+
+
+def test_resource_fragments_assemble_and_retract_without_embeddings():
+    first_source = source()
+    second_source = replace(
+        first_source,
+        resources=(first_source.resources[0], Resource("other", "v7", "other.csv", parent_id="root")),
+        chunks=(SourceChunk("other:v7", "other", "v7", "parser:other", "id,name\n3,Orange\n4,Pink"),),
+    )
+    first = build_resource_fragment(first_source, snapshot_id="fragment:first")
+    second = build_resource_fragment(second_source, snapshot_id="fragment:second")
+    assert not first.embeddings and "embeddings" not in first.components
+
+    combined_source = replace(
+        first_source,
+        resources=first_source.resources + (second_source.resources[1],),
+        chunks=first_source.chunks + second_source.chunks,
+        snapshot_id="source:combined",
+    )
+    combined = assemble_resource_fragments(combined_source, (second, first), snapshot_id="graph:combined")
+    assert {"Red", "Orange"} <= {entity.label for entity in combined.entities}
+    assert combined.extensions["xgen_ontology.assembly"]["fragment_count"] == 2
+
+    retracted_source = replace(combined_source, resources=first_source.resources, chunks=first_source.chunks)
+    retracted = assemble_resource_fragments(retracted_source, (first,), snapshot_id="graph:retracted")
+    assert "Orange" not in {entity.label for entity in retracted.entities}
+
+
+def test_resource_fragment_rejects_stale_and_duplicate_revisions():
+    fragment = build_resource_fragment(source(), snapshot_id="fragment")
+    with pytest.raises(ContractError, match="duplicate resource fragment"):
+        assemble_resource_fragments(source(), (fragment, fragment), snapshot_id="graph")
+    with pytest.raises(ContractError, match="current resource revision"):
+        assemble_resource_fragments(source(revision="v2"), (fragment,), snapshot_id="graph")

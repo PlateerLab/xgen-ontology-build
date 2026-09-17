@@ -68,7 +68,12 @@ from .facade import (
                                   build_from_triples,
                                   rows_to_csv,
 )
-from .knowledge_build import build_knowledge, export_knowledge
+from .knowledge_build import (
+    assemble_resource_fragments,
+    build_knowledge,
+    build_resource_fragment,
+    export_knowledge,
+)
 from .korean import clean_name, is_sentence_like, normalize_label, strip_list_markers
 from .llm import CallableLLM, EchoLLM
 from .models import (
@@ -89,11 +94,11 @@ from .ontology import Ontology
 from .protocols import LLM, Embedder, GraphSink, GraphStore, Morphology, VectorStore
 from .text import BM25, safe_uri, tokenize
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 __all__ = [
     # portable knowledge exchange
-    "build_knowledge", "export_knowledge",
+    "build_knowledge", "export_knowledge", "build_resource_fragment", "assemble_resource_fragments",
     # facade
     "build_from_documents", "build_from_text", "build_from_files", "build_from_csv",
     "build_from_csv_files", "build_from_triples", "rows_to_csv", "OntologyBuilder", "Ontology",
