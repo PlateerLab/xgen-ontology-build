@@ -19,6 +19,7 @@ import json
 import re
 from typing import Any
 
+from ..build.taxonomy import DEFAULT_RELATED_PREDICATE
 from ..korean import normalize_label
 from ..models import Chunk, Class, Concepts, DataProperty, DataValue, Instance, Node, ObjectProperty, Relation
 from ..text import tokenize
@@ -45,6 +46,8 @@ _DDL = {
         "CREATE INDEX IF NOT EXISTS ix_oedges_o ON ontology_edges (collection_id, object_uri)",
         "CREATE INDEX IF NOT EXISTS ix_oedges_po ON ontology_edges (collection_id, predicate, object_uri)",
         "CREATE INDEX IF NOT EXISTS ix_onc_coll_chunk ON ontology_node_chunks (collection_id, chunk_id)",
+        "CREATE INDEX IF NOT EXISTS ix_onc_coll_uri ON ontology_node_chunks (collection_id, uri)",
+        "CREATE INDEX IF NOT EXISTS ix_oec_coll ON ontology_enriched_chunks (collection_id)",
     ],
     "sqlite": [
         "CREATE TABLE IF NOT EXISTS ontology_nodes (id INTEGER PRIMARY KEY, collection_id TEXT NOT NULL,"
@@ -203,10 +206,13 @@ class PgGraph:
         finally:
             cur.close()
 
-    def _x(self, sql: str, params: tuple = ()) -> None:
+    def _x(self, sql: str, params: tuple = ()) -> int:
         cur = self.conn.cursor()
         cur.execute(sql.replace("?", self._ph), params)
-        cur.close()
+        try:
+            return max(0, int(cur.rowcount or 0))
+        finally:
+            cur.close()
 
     def _insert(self, prefix: str, n_cols: int, rows: list[tuple], suffix: str) -> None:
         batch = max(1, min(_INSERT_BATCH, 999 // max(1, n_cols)))
@@ -276,6 +282,105 @@ class PgGraph:
     def enriched_chunk_ids(self) -> set[str]:
         return {r[0] for r in self._q("SELECT chunk_id FROM ontology_enriched_chunks WHERE collection_id=?",
                                       (self.collection_id,))}
+
+    def prune_chunks(self, chunk_ids, *, structural_predicates=(DEFAULT_RELATED_PREDICATE, "sameAs")) -> dict:
+        """Take deleted chunks out of the stored graph: the production deletion delta, on the tables.
+
+        Removes the chunks' links and the nodes they were the only evidence for: individuals
+        with no link left, classes with no link left that nothing refers to any more (their
+        own property declarations and parent link are not references), the property nodes
+        only those classes declared, and every edge touching them. A relation between two
+        surviving nodes that no longer share a chunk has lost its evidence and goes too, except
+        relations made from name structure (``structural_predicates``). The chunks' enrich
+        markers go so a later relation pass does not wait on them. Same rules as
+        :func:`~xgen_ontology.build.retract.retract_chunks` on the build models.
+
+        Several statements; run them in one transaction (a non-autocommit connection, then
+        commit). Their order still makes a retry safe on an autocommit connection: the links
+        are removed last, so an interrupted run leaves them in place and the next call finds
+        the same nodes again. Returns ``chunks / links / nodes / edges / enriched`` counts.
+        """
+        ids = sorted({str(c) for c in (chunk_ids or []) if c})
+        stats = {"chunks": len(ids), "links": 0, "nodes": 0, "edges": 0, "enriched": 0}
+        if not ids:
+            return stats
+        C = self.collection_id
+        gone = "(SELECT chunk_id FROM xo_prune_chunks)"
+        cand = "(SELECT uri FROM xo_prune_cand)"
+        gone_uris = "(SELECT uri FROM xo_prune_gone)"
+        for t, col in (("xo_prune_chunks", "chunk_id"), ("xo_prune_cand", "uri"), ("xo_prune_gone", "uri")):
+            self._x(f"CREATE TEMP TABLE IF NOT EXISTS {t} ({col} TEXT PRIMARY KEY)")
+            self._x(f"DELETE FROM {t}")
+        try:
+            self._insert("INSERT INTO xo_prune_chunks(chunk_id)", 1, [(c,) for c in ids],
+                         "ON CONFLICT (chunk_id) DO NOTHING")
+            stats["links"] = self._q(f"SELECT count(*) FROM ontology_node_chunks WHERE collection_id=?"
+                                     f" AND chunk_id IN {gone}", (C,))[0][0]
+            stats["enriched"] = self._x(
+                f"DELETE FROM ontology_enriched_chunks WHERE collection_id=? AND chunk_id IN {gone}", (C,))
+            if not stats["links"]:
+                return stats
+            # the nodes that lose a link are the candidates of the first round
+            self._x("INSERT INTO xo_prune_cand(uri) SELECT DISTINCT uri FROM ontology_node_chunks"
+                    f" WHERE collection_id=? AND chunk_id IN {gone}", (C,))
+            # relations whose two ends survive but no longer share a chunk outside the removed ones
+            ph = ",".join(["?"] * len(structural_predicates)) or "''"
+            stats["edges"] = self._x(
+                "DELETE FROM ontology_edges WHERE collection_id=? AND edge_kind='objectProperty'"
+                f" AND predicate NOT IN ({ph}) AND subject_uri IN {cand} AND object_uri IN {cand}"
+                " AND NOT EXISTS (SELECT 1 FROM ontology_node_chunks a"
+                "                  JOIN ontology_node_chunks b ON b.collection_id=a.collection_id"
+                "                   AND b.chunk_id=a.chunk_id AND b.uri=ontology_edges.object_uri"
+                "                  WHERE a.collection_id=ontology_edges.collection_id"
+                f"                   AND a.uri=ontology_edges.subject_uri AND a.chunk_id NOT IN {gone})",
+                (C, *structural_predicates))
+            # nodes the removed chunks were the only evidence for; then, round by round, the classes
+            # whose last reference was one of them (a class referenced by nothing, linked to no chunk)
+            no_link_left = ("NOT EXISTS (SELECT 1 FROM ontology_node_chunks c WHERE c.collection_id=n.collection_id"
+                            f" AND c.uri=n.uri AND c.chunk_id NOT IN {gone})")
+            orphan_sql = (
+                "WITH orphan_inst AS (SELECT n.uri FROM ontology_nodes n WHERE n.collection_id=? AND n.kind='instance'"
+                f"   AND n.uri IN {cand} AND {no_link_left}),"
+                " orphan_cls AS (SELECT n.uri FROM ontology_nodes n WHERE n.collection_id=? AND n.kind='concept'"
+                f"   AND n.uri IN {cand} AND {no_link_left}"
+                "   AND NOT EXISTS (SELECT 1 FROM ontology_edges e WHERE e.collection_id=n.collection_id"
+                "        AND (e.subject_uri=n.uri OR e.object_uri=n.uri)"
+                "        AND NOT (e.subject_uri=n.uri AND e.edge_kind IN"
+                "                 ('datatypeProperty_schema', 'objectProperty_schema', 'subClassOf'))"
+                "        AND e.subject_uri NOT IN (SELECT uri FROM orphan_inst)"
+                "        AND e.object_uri NOT IN (SELECT uri FROM orphan_inst))),"
+                " orphan_prop AS (SELECT n.uri FROM ontology_nodes n WHERE n.collection_id=? AND n.kind='property'"
+                "   AND EXISTS (SELECT 1 FROM ontology_edges e WHERE e.collection_id=n.collection_id"
+                "        AND e.object_uri=n.uri AND e.subject_uri IN (SELECT uri FROM orphan_cls))"
+                "   AND NOT EXISTS (SELECT 1 FROM ontology_edges e WHERE e.collection_id=n.collection_id"
+                "        AND e.object_uri=n.uri AND e.subject_uri NOT IN (SELECT uri FROM orphan_cls)))"
+                " SELECT uri FROM orphan_inst UNION SELECT uri FROM orphan_cls UNION SELECT uri FROM orphan_prop")
+            while True:
+                orphans = sorted({r[0] for r in self._q(orphan_sql, (C, C, C))})
+                if not orphans:
+                    break
+                self._x("DELETE FROM xo_prune_gone")
+                self._insert("INSERT INTO xo_prune_gone(uri)", 1, [(u,) for u in orphans],
+                             "ON CONFLICT (uri) DO NOTHING")
+                # the classes these nodes pointed at are the next round's candidates
+                self._x("DELETE FROM xo_prune_cand")
+                self._x("INSERT INTO xo_prune_cand(uri) SELECT DISTINCT e.object_uri FROM ontology_edges e"
+                        " JOIN ontology_nodes n ON n.collection_id=e.collection_id AND n.uri=e.object_uri"
+                        f" AND n.kind='concept' WHERE e.collection_id=? AND e.subject_uri IN {gone_uris}"
+                        f" AND e.object_uri NOT IN {gone_uris}", (C,))
+                stats["edges"] += self._x(
+                    f"DELETE FROM ontology_edges WHERE collection_id=? AND (subject_uri IN {gone_uris}"
+                    f" OR object_uri IN {gone_uris})", (C,))
+                stats["nodes"] += self._x(
+                    f"DELETE FROM ontology_nodes WHERE collection_id=? AND uri IN {gone_uris}", (C,))
+            self._x(f"DELETE FROM ontology_node_chunks WHERE collection_id=? AND chunk_id IN {gone}", (C,))
+        finally:
+            for t in ("xo_prune_chunks", "xo_prune_cand", "xo_prune_gone"):
+                try:
+                    self._x(f"DROP TABLE IF EXISTS {t}")
+                except Exception:
+                    pass   # an aborted transaction refuses it; a temp table dies with the session anyway
+        return stats
 
     def counts(self) -> dict:
         C = self.collection_id

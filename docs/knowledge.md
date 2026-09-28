@@ -93,10 +93,12 @@ versioned knowledge exchange artifact.
 ## Modification, deletion, cancellation
 
 `build_knowledge` builds a **complete replacement** from the current source corpus.
-Pass the updated resource revisions/chunks/embeddings; omit removed sources. The old
-additive `extend()` is not a safe deletion primitive and is not used for this path.
+Pass the updated resource revisions/chunks/embeddings; omit removed sources.
 Rebuilding naturally retracts unsupported facts while retaining knowledge supported
 by surviving input. This first version prioritizes correctness over delta efficiency.
+The incremental API has its own deletion delta since 0.11.0
+(`OntologyBuilder.extend(..., retract_missing=True)` / `retract`, `PgGraph.prune_chunks`);
+this path does not use it and stays a full rebuild of the snapshot.
 
 Building returns data only. The host stages and validates it, then publishes all
 three components with a compare-and-swap against the expected current snapshot.

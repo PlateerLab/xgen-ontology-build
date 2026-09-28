@@ -84,6 +84,7 @@ The pipeline is a sequence of independently-importable, backend-agnostic stages:
 | **dedup** | merge synonymous names — content-morpheme keys for instances (shortest spelling wins), (domain, range, key) groups for properties, LLM synonym groups (`mode="enrich"` only), embedding cosine clusters when an embedder is given |
 | **hierarchy** | keep only genuine is-a edges ("being linked is not being a subclass"), break cycles, repair instances typed by a class of their own name, materialize inherited properties onto subclasses |
 | **normalize** | the store-loading rules: a class must look like a class name; a relation named with graph vocabulary (`type`, `instanceOf`, `subClassOf`, `sameAs`) is a typing statement; a relation whose predicate is a declared datatype property or whose object is a value is an attribute; a subject that is a value is dropped; anything referenced is declared (no dangling endpoints) |
+| **retract** | a deleted document leaves as a delta, not a rebuild: its chunks' links go, then whatever they were the only evidence for. An individual with no chunk left; a class with no chunk left that nothing refers to any more (its own declarations do not count), evaluated to a fixpoint so a class whose only individual or subclass went goes too; the properties only those classes declared; a relation whose two ends no longer share a chunk (links made from name structure, the "related" neighbour and `sameAs`, are not chunk evidence and stay). Same rules on the build models (`retract_chunks`) and on the graph tables (`PgGraph.prune_chunks`); the post-build then runs over the surviving corpus |
 | **quality** | a graph-reviewer score: completeness · integrity · grounding · shape, recorded on `onto.report.quality` |
 | **resolve** | (off by default) fuzzy entity resolution: fold similar surface forms, *guarding* dates/ids and number-conflicting names |
 | **community** | Louvain modularity clustering (pure Python) |
@@ -92,7 +93,7 @@ The pipeline is a sequence of independently-importable, backend-agnostic stages:
 ### Keep building: incremental, dictionary, identifiers
 
 ```python
-from xgen_ontology import OntologyBuilder, TermDictionary, unbuilt_chunks
+from xgen_ontology import OntologyBuilder, TermDictionary, removed_chunks, unbuilt_chunks
 
 builder = OntologyBuilder()                      # or mode="enrich" with an llm
 onto = builder.build({"2024.md": [...chunks...]})
@@ -102,6 +103,13 @@ onto = builder.build({"2024.md": [...chunks...]})
 # reach. In enrich mode the LLM pass covers only chunks it has not asked about yet.
 unbuilt_chunks(onto, {"2024.md": [...], "2025.md": [...]})     # what extend() would do
 builder.extend(onto, {"2024.md": [...], "2025.md": [...]})
+
+# a deleted document is a delta too: pass the whole current corpus and the chunks that
+# left it are retracted before extraction (their links, the nodes and relations they were
+# the only evidence for), then the post-build runs over what is left
+removed_chunks(onto, {"2025.md": [...]})                       # -> ["2024.md#0", ...]
+builder.extend(onto, {"2025.md": [...]}, retract_missing=True)
+builder.retract(onto, ["2024.md#0"])                           # or by chunk id, no extraction
 
 # a term dictionary (acronym -> full form, house spelling -> official one) applies at
 # build time, at query time and at indexing time
@@ -170,13 +178,14 @@ pg.write(OntologyBuilder().build(docs))   # rows identical to the product's own 
 onto = pg.load()                          # back into build models (chunk ids only)
 OntologyBuilder().extend(onto, more_docs) # incremental
 pg.write(onto, replace=False)             # append; a node seen again merges its attributes
+pg.prune_chunks(deleted_chunk_ids)        # a deleted document, applied as a delta on the tables
 
 onto.search(...)                          # or GraphRAG(pg, vector_store, llm) straight on the tables
 ```
 
 Job and session bookkeeping is the application's; `OntologyBuilder(progress=fn)`
-reports each stage (`start / tables / extract / enrich / llm / dedup / hierarchy /
-finalize / done`) so a job table can be driven from it.
+reports each stage (`start / retract / tables / extract / enrich / llm / dedup /
+hierarchy / finalize / done`) so a job table can be driven from it.
 
 ## Install
 
@@ -232,6 +241,7 @@ src/xgen_ontology/
     dedup.py         # rule + LLM + vector dedup
     hierarchy.py     # is-a cleaning, self-typed repair, property inheritance
     finalize.py      # graph normalization (the store-loading rules)
+    retract.py       # deleted chunks out of the graph as a delta (evidence, orphans, structural links)
     dictionary.py    # TermDictionary: alias -> canonical at build / query / indexing time
     translate.py     # LLM translation of names to English IRI local names
     quality.py     # graph-reviewer score

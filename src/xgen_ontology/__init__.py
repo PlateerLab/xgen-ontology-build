@@ -45,9 +45,10 @@ from .build.hierarchy import (
     materialize_property_inheritance,
 )
 from .build.parse import extract_text, html_to_text, load_documents
-from .build.pipeline import OntologyBuilder, unbuilt_chunks
+from .build.pipeline import OntologyBuilder, removed_chunks, unbuilt_chunks
 from .build.quality import review_quality
 from .build.resolve import resolve_entities
+from .build.retract import retract_chunks
 from .build.tabular import analyze_tables, build_from_tables
 from .build.taxonomy import (
                                   extract_hearst_pairs,
@@ -94,7 +95,7 @@ from .ontology import Ontology
 from .protocols import LLM, Embedder, GraphSink, GraphStore, Morphology, VectorStore
 from .text import BM25, safe_uri, tokenize
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 __all__ = [
     # portable knowledge exchange
@@ -102,7 +103,7 @@ __all__ = [
     # facade
     "build_from_documents", "build_from_text", "build_from_files", "build_from_csv",
     "build_from_csv_files", "build_from_triples", "rows_to_csv", "OntologyBuilder", "Ontology",
-    "unbuilt_chunks",
+    "unbuilt_chunks", "removed_chunks",
     # search
     "GraphRAG",
     # ingest
@@ -114,7 +115,7 @@ __all__ = [
     "shorten_entity_name", "govern_predicates", "normalize_predicate", "strip_argument_noun",
     "vote_relation_direction", "merge_predicates", "clean_hierarchy", "fix_self_typed_instances",
     "materialize_property_inheritance", "review_quality", "detect_communities",
-    "louvain_communities", "normalize_graph", "translate_names", "clean_korean_name",
+    "louvain_communities", "normalize_graph", "retract_chunks", "translate_names", "clean_korean_name",
     "TermDictionary", "Term", "to_rdf_triples", "to_turtle", "to_owl_xml",
     # hierarchy induction (Hearst patterns + name structure, zero LLM calls)
     "induce_hierarchy", "hearst_hierarchy", "extract_hearst_pairs",

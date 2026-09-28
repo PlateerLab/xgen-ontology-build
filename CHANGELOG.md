@@ -1,3 +1,38 @@
+# 0.11.0 (2026-09-28)
+
+**A deleted document leaves the graph as a delta.** The production deletion path
+(`prune_chunks`, in the product since 2026-09-17) ported over the build models and the
+graph tables; every other build stage was checked against the production source and is
+unchanged since the 0.6-0.8 port.
+
+- **`build.retract.retract_chunks`** (new) -- take chunks out of a built graph in place:
+  their links go, then whatever they were the only evidence for. An entity's evidence is
+  every chunk that links it (its own, its relations', its attributes'). An individual with
+  no chunk left is an orphan; a class with no chunk left is an orphan unless something still
+  refers to it (an individual typed by it, a subclass, a property ranging over it, a
+  relation; its own declarations do not count), evaluated to a fixpoint so a class whose
+  only individual or subclass went goes too; properties declared only by orphan classes go
+  with them; a relation between two survivors that no longer share a chunk has lost its
+  evidence and goes, except relations made from name structure (`structural_predicates`:
+  the "related" neighbour link, `sameAs`). Survivors keep only their surviving chunks.
+- **`OntologyBuilder.retract(onto, chunk_ids)`** -- retraction followed by the post-build
+  (merge, hierarchy, normalization) over what is left, the production removal-only build.
+  **`OntologyBuilder.extend(..., retract_missing=True)`** treats `documents` as the whole
+  current corpus and retracts the chunks that left it before extracting (the store's
+  `baseline - snapshot`); off by default because `extend` also accepts only the new
+  documents. `removed_chunks(onto, documents)` shows what that would retract, next to
+  `unbuilt_chunks`. `BuildReport.retracted` carries the counts; the progress callback gets
+  a `retract` stage.
+- **`PgGraph.prune_chunks(chunk_ids)`** -- the same rules on the tables, several statements
+  in the production order (links last, so an interrupted run on an autocommit connection is
+  retried from the same state), over temp tables so a large deletion needs no long `IN`
+  lists; portable across PostgreSQL and sqlite. Verified on both with identical results.
+  `ensure_schema()` adds the two read indexes the production migration has that the DDL
+  here lacked (`ontology_node_chunks (collection_id, uri)`,
+  `ontology_enriched_chunks (collection_id)`).
+- The producer fixture `tests/fixtures/knowledge-v1.json` regenerated: the embedded build
+  report gained the `retracted` key, nothing else changed.
+
 # 0.9.1 (2026-09-17)
 
 - Normalize UTF-16 surrogate pairs from document parsers and model JSON into

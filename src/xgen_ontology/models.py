@@ -154,5 +154,6 @@ class BuildReport:
     chunks: int = 0            # chunks the ontology has seen (grows with extend())
     mode: str = ""             # "basic" | "enrich" | "llm"
     normalized: dict = field(default_factory=dict)   # normalize_graph() counts (rerouted / dropped)
+    retracted: dict = field(default_factory=dict)    # retract_chunks() counts of the last retraction
     quality: dict = field(default_factory=dict)   # review_quality() of the finished build
     notes: list[str] = field(default_factory=list)

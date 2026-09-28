@@ -18,13 +18,17 @@ database plumbing:
 4. a quality review recorded on the report
 
 Pass ``progress=callable`` to be told each stage (``progress(stage, detail)``); the
-stages are start / tables / extract / enrich / llm / dedup / hierarchy / finalize /
-done. Job and session bookkeeping is the application's: drive it from that callback.
+stages are start / retract / tables / extract / enrich / llm / dedup / hierarchy /
+finalize / done. Job and session bookkeeping is the application's: drive it from
+that callback.
 
 :meth:`OntologyBuilder.extend` runs the same pipeline incrementally over the
-chunks an existing ontology has not seen. Each stage is independently importable;
-the orchestrator only wires them with injected backends (LLM / morphology /
-embedder / term dictionary), all optional.
+chunks an existing ontology has not seen; with ``retract_missing=True`` the chunks
+that left the corpus are taken out first (:mod:`.retract`), so a deleted document
+is a delta too, not a rebuild. :meth:`OntologyBuilder.retract` does only that and
+the post-build. Each stage is independently importable; the orchestrator only
+wires them with injected backends (LLM / morphology / embedder / term dictionary),
+all optional.
 """
 from __future__ import annotations
 
@@ -39,6 +43,7 @@ from .govern import merge_predicates
 from .hierarchy import clean_hierarchy, fix_self_typed_instances, materialize_property_inheritance
 from .quality import review_quality
 from .resolve import resolve_entities
+from .retract import retract_chunks
 from .tabular import TABLE_EXTENSIONS, analyze_tables, build_from_tables
 from .taxonomy import DEFAULT_RELATED_PREDICATE, fold_name_fragments, induce_hierarchy, prune_common_words
 
@@ -93,7 +98,8 @@ class OntologyBuilder:
         return self._run(Ontology(), _normalize_documents(documents, chunk=self.chunk,
                                                           size=self.chunk_size, overlap=self.chunk_overlap))
 
-    def extend(self, ontology, documents: dict[str, list[dict]], *, rebuild: bool = False):
+    def extend(self, ontology, documents: dict[str, list[dict]], *, rebuild: bool = False,
+               retract_missing: bool = False):
         """Incremental build: extract only the chunks ``ontology`` has not seen, then re-run the post-build.
 
         Chunks are recognized by id, so pass the same ids the original build saw
@@ -102,16 +108,48 @@ class OntologyBuilder:
         restricted to the names this extension introduced and the names they can
         touch, the way the production store does it. In ``enrich`` mode the LLM
         pass covers only chunks whose relations were not asked for yet.
-        ``rebuild=True`` treats every chunk as new. Returns the same ``ontology``.
+        ``rebuild=True`` treats every chunk as new.
+
+        With ``retract_missing=True``, ``documents`` is the *whole* current corpus:
+        chunks the ontology has that are not in it were deleted and are retracted
+        before extraction (the store's ``baseline - snapshot`` delta), so the
+        post-build runs over the current corpus. Leave it off when you pass only the
+        new documents. Returns the same ``ontology``.
         """
         documents = _normalize_documents(documents, chunk=self.chunk, size=self.chunk_size,
                                          overlap=self.chunk_overlap)
+        if retract_missing:
+            present = {ch["chunk_id"] for chs in documents.values() for ch in chs}
+            self._retract(ontology, [c.id for c in ontology.chunks if c.id not in present])
         if rebuild:
             ontology.chunks = [c for c in ontology.chunks
                                if c.id not in {ch["chunk_id"] for chs in documents.values() for ch in chs}]
             ontology.enriched_chunks = [c for c in ontology.enriched_chunks
                                         if c not in {ch["chunk_id"] for chs in documents.values() for ch in chs}]
         return self._run(ontology, documents, incremental=True)
+
+    def retract(self, ontology, chunk_ids):
+        """Take deleted chunks out of ``ontology`` and re-run the post-build over what is left.
+
+        Nothing is extracted; the merge, hierarchy and normalization passes run so the
+        graph is what a build of the surviving corpus would leave. The counts land on
+        ``ontology.report.retracted``. Returns the same ``ontology``.
+        """
+        self._retract(ontology, chunk_ids)
+        return self._run(ontology, {}, incremental=True)
+
+    def _retract(self, onto, chunk_ids) -> dict:
+        ids = {str(c) for c in (chunk_ids or []) if c}
+        stats = {"chunks": 0}
+        if ids:
+            self._tick("retract", chunks=len(ids))
+            structural = (self.related_predicate, "sameAs") if self.related_predicate else ("sameAs",)
+            stats = retract_chunks(onto.concepts, onto.instances, onto.relations, onto.data_values, ids,
+                                   structural_predicates=structural)
+            onto.chunks = [c for c in onto.chunks if c.id not in ids]
+            onto.enriched_chunks = [c for c in onto.enriched_chunks if c not in ids]
+        onto.report.retracted = stats
+        return stats
 
     # ── the pipeline ──
 
@@ -267,6 +305,14 @@ def unbuilt_chunks(ontology, documents: dict[str, list[dict]]) -> dict[str, list
     known = {c.id for c in ontology.chunks}
     out = {n: [ch for ch in chs if ch["chunk_id"] not in known] for n, chs in docs.items()}
     return {n: chs for n, chs in out.items() if chs}
+
+
+def removed_chunks(ontology, documents: dict[str, list[dict]]) -> list[str]:
+    """The chunk ids ``ontology`` has built that ``documents`` (the whole current corpus) no longer contain.
+
+    What ``extend(..., retract_missing=True)`` would retract: the deleted documents' chunks."""
+    present = {ch["chunk_id"] for chs in _normalize_documents(documents).values() for ch in chs}
+    return sorted(c.id for c in ontology.chunks if c.id not in present)
 
 
 def _linked_names(concepts: Concepts, instances: list[Instance], relations: list[Relation]) -> set[str]:
