@@ -462,66 +462,6 @@ def induce_head_noun_hierarchy(
     return edges, same, related
 
 
-_BAG_SKIP_PREFIX = ("J", "E", "V", "SP", "SF", "SS", "SE", "SO", "SW")   # particles, endings, copulas/verbs, punctuation: not parts of a name
-
-
-def _morpheme_bag(name: str) -> tuple[str, ...]:
-    """The parts of a proper name, order removed; ``()`` for anything else.
-
-    Only proper nouns are spelled in more than one order for the same thing ("Hotel
-    Shilla" / "Shilla Hotel"). A common-noun compound has its head last, so another
-    order is another thing ("information protection" is not "protected information"),
-    and a suffix is a part ("bank-per" is not a spelling of "bank"). So: every morpheme
-    but particles, endings and punctuation must be a proper noun (NNP); the parts are
-    those morphemes. A name the analyzer keeps whole has no parts to permute, so it is
-    keyed by :func:`_rotation_key` instead: "Hotel Shilla" and "Shilla Hotel" are the
-    same string cut once and swapped, while two names that merely share letters are not."""
-    toks = [t for t in (tokenize(name) or ()) if not t.tag.startswith(_BAG_SKIP_PREFIX)]
-    if not toks or any(t.tag != "NNP" for t in toks):
-        return ()
-    if len(toks) >= 2:
-        return tuple(sorted(t.form.lower() for t in toks))
-    compact = "".join(name.split()).lower()
-    return _rotation_key(compact) if len(compact) >= 4 else ()
-
-
-def _rotation_key(text: str) -> tuple[str, ...]:
-    """The smallest rotation of ``text``, as a one-part bag, so that ``A + B`` and ``B + A``
-    share a key. Only a swap of two blocks maps here; a rearrangement of letters does not
-    (a permuted name is not a rotation), so this is much narrower than a sorted bag."""
-    n = len(text)
-    doubled = text + text
-    return ("\x00" + min(doubled[i:i + n] for i in range(n)),)
-
-
-def induce_aliases(names, chunks_of: dict[str, set[str]]) -> dict[str, str]:
-    """Spellings of one proper name -> ``{variant: canonical}``, from corpus evidence, no dictionary.
-
-    Two names are aliases when they are proper names made of the same parts in another
-    order ("Hotel Shilla" / "Shilla Hotel"; see :func:`_morpheme_bag` for why common-noun
-    compounds are never candidates) **and** the corpus uses both spellings in at least
-    one shared chunk. The canonical spelling is the one used in more chunks, then the
-    shorter one. Scale-free: names are grouped by their part bag, so nothing is compared
-    across groups.
-    """
-    groups: dict[tuple[str, ...], list[str]] = defaultdict(list)
-    for name in dict.fromkeys(n for n in names if n):
-        bag = _morpheme_bag(name)
-        if bag:
-            groups[bag].append(name)
-    rename: dict[str, str] = {}
-    for members in groups.values():
-        if len(members) < 2:
-            continue
-        members.sort(key=lambda n: (-len(chunks_of.get(n, ())), len(n), n))
-        canon = members[0]
-        canon_chunks = set(chunks_of.get(canon, ()))
-        for variant in members[1:]:
-            if canon_chunks & set(chunks_of.get(variant, ())):
-                rename[variant] = canon
-    return rename
-
-
 def induce_hierarchy(
     concepts: Concepts,
     texts: list[str] | None = None,

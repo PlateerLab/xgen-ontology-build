@@ -48,7 +48,6 @@ from .tabular import TABLE_EXTENSIONS, analyze_tables, build_from_tables
 from .taxonomy import (
     DEFAULT_RELATED_PREDICATE,
     fold_name_fragments,
-    induce_aliases,
     induce_hierarchy,
     prune_common_words,
 )
@@ -245,19 +244,6 @@ class OntologyBuilder:
             if rename:
                 Deduplicator._apply_instance(rename, instances, relations, data_values)
                 report.renamed += len(rename)
-            # Synonym layer: spellings of one thing (same morphemes, other order, seen together).
-            chunks_of: dict[str, set[str]] = {}
-            for i in instances:
-                if i.name:
-                    chunks_of.setdefault(i.name, set()).update(c for c in i.source_chunks if c)
-            for c in concepts.classes:
-                if c.name:
-                    chunks_of.setdefault(c.name, set()).update(x for x in c.source_chunks if x)
-            alias = {o: n for o, n in induce_aliases(list(chunks_of), chunks_of).items() if o not in protected}
-            if alias:
-                Deduplicator._apply_instance(alias, instances, relations, data_values)
-                Deduplicator._apply_class(alias, concepts, instances)
-                report.aliased += len(alias)
             report.predicates_merged += merge_predicates(relations, deduper._norm_key)["merged_predicates"]
             report.folded += _apply_fold(concepts, instances, data_values, relations)
             report.pruned += _apply_prune(instances, relations, data_values, self.common_word_rank)

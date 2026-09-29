@@ -1,4 +1,4 @@
-"""The ontology-learning layers as gates: terms (row dumps are not prose), synonyms (aliases from evidence),
+"""The ontology-learning layers as gates: terms (row dumps are not prose),
 concepts (a generic head is not a type), taxonomy (Hearst reads the sentence, not a quoted title)."""
 import pytest
 
@@ -7,9 +7,7 @@ from xgen_ontology.build.taxonomy import (
     _MORPH_CACHE,
     DEFAULT_RELATED_PREDICATE,
     _morph_starts,
-    _rotation_key,
     extract_hearst_pairs,
-    induce_aliases,
     induce_head_noun_hierarchy,
 )
 from xgen_ontology.korean import get_kiwi
@@ -40,17 +38,6 @@ def test_hearst_skips_quoted_titles_and_modifying_hypernyms():
     assert extract_hearst_pairs("도박, 사행행위 등 불법행위를 하는 자") == [("도박", "불법행위"), ("사행행위", "불법행위")]
     assert extract_hearst_pairs("한국마사회, 렛츠런재단 등 공공기관은 매년 보고한다.") == [
         ("한국마사회", "공공기관"), ("렛츠런재단", "공공기관")]
-
-
-@kiwi_required
-def test_aliases_need_a_proper_name_the_same_parts_and_a_shared_chunk():
-    chunks = {"호텔신라": {"c1", "c2"}, "신라호텔": {"c2"}, "신라 호텔": {"c9"}, "신라호텔식": {"c2"},
-              "신용평가정보": {"c3"}, "정보신용평가": {"c3"}, "정보보호": {"c4"}, "보호정보": {"c4"}}
-    alias = induce_aliases(list(chunks), chunks)
-    assert alias == {"신라호텔": "호텔신라"}      # canonical = the spelling used in more chunks, then shorter
-    assert "신라 호텔" not in alias                 # same parts, never seen together: no evidence
-    assert "신라호텔식" not in alias                # a suffix is a part, not another spelling
-    assert "정보신용평가" not in alias and "보호정보" not in alias   # common-noun compounds: the order is the head
 
 
 @kiwi_required
@@ -87,21 +74,6 @@ def test_spread_is_measured_over_documents_when_known():
     edges_by_chunk, _s, _r = induce_head_noun_hierarchy(names, class_labels={"여부", "공원"}, chunks_of=chunks_of,
                                                         corpus_chunks=200)
     assert ("여부", "감사여부") in edges_by_chunk        # by chunk share alone (12%) it would have passed
-
-
-@kiwi_required
-def test_alias_bag_keeps_suffixes_as_parts():
-    chunks = {"금융기관": {"c1"}, "금융기관별": {"c1"}}
-    assert induce_aliases(list(chunks), chunks) == {}     # "-별" is a part of the name, not a permutation
-
-
-def test_whole_name_key_is_a_rotation_not_a_permutation():
-    # A name the analyzer keeps whole is keyed by its rotation: the two blocks swapped
-    # ("호텔신라" / "신라호텔") share a key, letters merely rearranged do not.
-    assert _rotation_key("호텔신라") == _rotation_key("신라호텔")
-    assert _rotation_key("김민수정") != _rotation_key("김수민정")
-    assert _rotation_key("삼성전자") != _rotation_key("전자삼상")
-    assert len(_rotation_key("호텔신라")) == 1 and _rotation_key("호텔신라")[0].startswith("\x00")
 
 
 def test_morph_cache_is_bounded():

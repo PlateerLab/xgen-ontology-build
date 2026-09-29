@@ -1,3 +1,16 @@
+# 0.12.3 (2026-09-29)
+
+- `induce_aliases` is removed, and with it the synonym-by-reordering rule of 0.12.0-0.12.2.
+  Review of the production port showed the rule was not safe as an automatic merge: a
+  whole name has no morpheme boundary to cut at (0.12.2's rotation key still cut at
+  every letter), a shared chunk is weak evidence when tables and lists put different
+  things side by side, and even proper names of several parts can mean different things
+  in another order. Measured on 764 regulation documents it also bought nothing: 2 of
+  1,646 whole names shared a rotation key, both different things ("금융리스" / "리스금융").
+  Synonyms still come from code-prefix `sameAs`, key merging and fragment folding; the
+  next evidence-based source is the definition pattern in the text itself
+  ("여신전문금융회사(이하 '여전사')"). `BuildReport.aliased` is gone.
+
 # 0.12.2 (2026-09-29)
 
 - `induce_aliases`: a name the analyzer keeps whole is keyed by its rotation, not by its

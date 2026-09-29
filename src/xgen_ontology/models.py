@@ -147,7 +147,6 @@ class BuildReport:
     relations: int = 0
     data_values: int = 0
     renamed: int = 0           # entities/classes/props merged by dedup
-    aliased: int = 0           # spellings folded by induce_aliases (same morphemes, other order, seen together)
     predicates_merged: int = 0
     folded: int = 0            # name fragments folded back into the name they came from
     pruned: int = 0            # unlinked common-word entities dropped

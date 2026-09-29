@@ -54,7 +54,6 @@ from .build.taxonomy import (
                                   extract_hearst_pairs,
                                   fold_name_fragments,
                                   hearst_hierarchy,
-                                  induce_aliases,
                                   induce_head_noun_hierarchy,
                                   induce_hierarchy,
                                   prose_only,
@@ -96,7 +95,7 @@ from .ontology import Ontology
 from .protocols import LLM, Embedder, GraphSink, GraphStore, Morphology, VectorStore
 from .text import BM25, safe_uri, tokenize
 
-__version__ = "0.12.2"
+__version__ = "0.12.3"
 
 __all__ = [
     # portable knowledge exchange
@@ -119,7 +118,7 @@ __all__ = [
     "louvain_communities", "normalize_graph", "retract_chunks", "translate_names", "clean_korean_name",
     "TermDictionary", "Term", "to_rdf_triples", "to_turtle", "to_owl_xml",
     # hierarchy induction (Hearst patterns + name structure, zero LLM calls)
-    "induce_hierarchy", "hearst_hierarchy", "extract_hearst_pairs", "induce_aliases",
+    "induce_hierarchy", "hearst_hierarchy", "extract_hearst_pairs",
     "induce_head_noun_hierarchy", "fold_name_fragments", "prune_common_words", "prose_only",
     # Korean text utilities (degrade gracefully with no morphological analyzer)
     "clean_name", "is_sentence_like", "normalize_label", "strip_list_markers",
