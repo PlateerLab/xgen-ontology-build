@@ -260,7 +260,7 @@ def looks_like_header(cell: str) -> bool:
     t = (cell or "").strip()
     if not t:
         return True
-    if is_value(t) or len(t) > _MAX_HEAD:
+    if is_value(t) or len(t) > _MAX_HEAD or _latin_fragment(t):
         return False
     if _ENUMERATOR.match(t) or _SENT_END.search(t):
         return False
@@ -309,9 +309,20 @@ def _phrase_pieces(phrase: str) -> list[str]:
     return out
 
 
+def _latin_fragment(name: str) -> bool:
+    """A Latin-script scrap too short to be a word unless it is an acronym: "of", "mm" are
+    scraps of a wrapped line; "IT", "DB", "PC" are names. No letters at all is a scrap too."""
+    letters = [ch for ch in name if ch.isalpha()]
+    if not letters:
+        return True
+    if all(ch.isascii() for ch in letters):
+        return len(letters) < 3 and not name.isupper()
+    return False
+
+
 def _acceptable(name: str) -> bool:
     n = name.strip()
-    return _MIN_NAME <= len(n) <= _MAX_NAME and any(ch.isalpha() for ch in n)
+    return _MIN_NAME <= len(n) <= _MAX_NAME and not _latin_fragment(n)
 
 
 def _morph_tails(name: str) -> list[str]:
@@ -342,7 +353,11 @@ _BRACKET_MARK = re.compile(r"^[\[(（].*[\])）]$")
 
 
 def _pipe_caption(text: str) -> str:
-    """The title line above a pipe table (markdown heading included) is the table's name."""
+    """The title line above a pipe table (markdown heading included) is the table's name.
+
+    The same shape test as an HTML caption: a list number ("5."), a value or a sentence
+    above the table is not its name. On a 764-document corpus a bare "5." had become a
+    class with 574 rows as its instances this way."""
     head = ""
     for line in (text or "").splitlines():
         if "|" in line:
@@ -354,7 +369,7 @@ def _pipe_caption(text: str) -> str:
         elif _BRACKET_MARK.match(raw):
             continue
         t = normalize_label(raw)
-        if t and _MIN_NAME <= len(t) <= _MAX_HEAD and not is_sentence_like(t):
+        if t and _MIN_NAME <= len(t) <= _MAX_HEAD and looks_like_header(t) and not is_sentence_like(t):
             head = t
     return head
 

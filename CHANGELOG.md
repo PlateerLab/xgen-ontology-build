@@ -1,3 +1,11 @@
+# 0.12.4 (2026-09-29)
+
+- Term layer: a pipe-table caption must have the shape of a name, the same test an HTML
+  caption already passed. A bare list number ("5.") above a table had become a class
+  with 574 rows as its instances on a 764-document corpus. A Latin-script scrap shorter
+  than an acronym ("of", "mm": lower-case, under three letters) is no longer a name
+  anywhere; "IT", "DB", "PC" still are. Found in the viewer of a production graph.
+
 # 0.12.3 (2026-09-29)
 
 - `induce_aliases` is removed, and with it the synonym-by-reordering rule of 0.12.0-0.12.2.
