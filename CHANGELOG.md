@@ -1,3 +1,10 @@
+# 0.12.1 (2026-09-29)
+
+- `induce_aliases` folds proper names only. A common-noun compound has its head last,
+  so another order is another thing ("정보보호" is not "보호정보"); every part of a
+  candidate must be a proper noun (NNP), and a suffix stays a part ("신라호텔식" is not
+  a spelling of "신라호텔"). Raised in review of the production port.
+
 # 0.12.0 (2026-09-29)
 
 **The build follows the ontology-learning layers, with evidence at each one and no word

@@ -462,27 +462,31 @@ _BAG_SKIP_PREFIX = ("J", "E", "V", "SP", "SF", "SS", "SE", "SO", "SW")   # parti
 
 
 def _morpheme_bag(name: str) -> tuple[str, ...]:
-    """The parts of a name, order removed: every morpheme but particles, endings and
-    punctuation (a suffix such as "-per" or "-ness" is a part: "bank-per" is not a
-    spelling of "bank"), or, for a name the analyzer keeps whole (a lexicalized proper
-    noun such as a company name), its syllables. Two spellings that permute the same
-    parts share a bag."""
-    toks = tokenize(name)
-    parts = [t.form.lower() for t in toks if not t.tag.startswith(_BAG_SKIP_PREFIX)] if toks else []
-    if len(parts) >= 2:
-        return tuple(sorted(parts))
+    """The parts of a proper name, order removed; ``()`` for anything else.
+
+    Only proper nouns are spelled in more than one order for the same thing ("Hotel
+    Shilla" / "Shilla Hotel"). A common-noun compound has its head last, so another
+    order is another thing ("information protection" is not "protected information"),
+    and a suffix is a part ("bank-per" is not a spelling of "bank"). So: every morpheme
+    but particles, endings and punctuation must be a proper noun (NNP); the parts are
+    those morphemes, or the syllables of a name the analyzer keeps whole."""
+    toks = [t for t in (tokenize(name) or ()) if not t.tag.startswith(_BAG_SKIP_PREFIX)]
+    if not toks or any(t.tag != "NNP" for t in toks):
+        return ()
+    if len(toks) >= 2:
+        return tuple(sorted(t.form.lower() for t in toks))
     compact = "".join(name.split()).lower()
     return tuple(sorted(compact)) if len(compact) >= 4 else ()
 
 
 def induce_aliases(names, chunks_of: dict[str, set[str]]) -> dict[str, str]:
-    """Spellings of one thing -> ``{variant: canonical}``, from corpus evidence, no dictionary.
+    """Spellings of one proper name -> ``{variant: canonical}``, from corpus evidence, no dictionary.
 
-    Two names are aliases when they consist of the same content morphemes in another
-    order ("Hotel Shilla" / "Shilla Hotel") **and** the corpus uses both spellings in
-    at least one shared chunk. The canonical spelling is the one used in more chunks,
-    then the shorter one. A single-morpheme name has no order to vary and is never a
-    key. Scale-free: names are grouped by their morpheme bag, so nothing is compared
+    Two names are aliases when they are proper names made of the same parts in another
+    order ("Hotel Shilla" / "Shilla Hotel"; see :func:`_morpheme_bag` for why common-noun
+    compounds are never candidates) **and** the corpus uses both spellings in at least
+    one shared chunk. The canonical spelling is the one used in more chunks, then the
+    shorter one. Scale-free: names are grouped by their part bag, so nothing is compared
     across groups.
     """
     groups: dict[tuple[str, ...], list[str]] = defaultdict(list)

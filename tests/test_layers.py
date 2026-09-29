@@ -40,13 +40,14 @@ def test_hearst_skips_quoted_titles_and_modifying_hypernyms():
 
 
 @kiwi_required
-def test_aliases_need_the_same_parts_and_a_shared_chunk():
-    chunks = {"호텔신라": {"c1", "c2"}, "신라호텔": {"c2"}, "신라 호텔": {"c9"}, "회사법": {"c1"},
-              "신용평가정보": {"c3"}, "정보신용평가": {"c3"}}
+def test_aliases_need_a_proper_name_the_same_parts_and_a_shared_chunk():
+    chunks = {"호텔신라": {"c1", "c2"}, "신라호텔": {"c2"}, "신라 호텔": {"c9"}, "신라호텔식": {"c2"},
+              "신용평가정보": {"c3"}, "정보신용평가": {"c3"}, "정보보호": {"c4"}, "보호정보": {"c4"}}
     alias = induce_aliases(list(chunks), chunks)
-    assert alias == {"신라호텔": "호텔신라", "정보신용평가": "신용평가정보"}   # canonical = the spelling used more, then shorter
-    assert "신라 호텔" not in alias                                            # same parts, never seen together: no evidence
-    assert "회사법" not in alias                                              # one part: nothing to permute
+    assert alias == {"신라호텔": "호텔신라"}      # canonical = the spelling used in more chunks, then shorter
+    assert "신라 호텔" not in alias                 # same parts, never seen together: no evidence
+    assert "신라호텔식" not in alias                # a suffix is a part, not another spelling
+    assert "정보신용평가" not in alias and "보호정보" not in alias   # common-noun compounds: the order is the head
 
 
 @kiwi_required
