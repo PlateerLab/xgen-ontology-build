@@ -1,3 +1,12 @@
+# 0.12.2 (2026-09-29)
+
+- `induce_aliases`: a name the analyzer keeps whole is keyed by its rotation, not by its
+  sorted letters. "호텔신라" and "신라호텔" are the same string cut once and swapped and
+  still fold; two different names that merely share letters ("김민수정" / "김수민정") no
+  longer can. Raised in review of the production port.
+- `_morph_starts` cache is bounded (LRU, 262,144 names) so a long-lived process does not
+  grow without limit.
+
 # 0.12.1 (2026-09-29)
 
 - `induce_aliases` folds proper names only. A common-noun compound has its head last,

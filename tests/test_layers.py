@@ -4,7 +4,10 @@ import pytest
 
 from xgen_ontology.build.deterministic import parse_row_dump
 from xgen_ontology.build.taxonomy import (
+    _MORPH_CACHE,
     DEFAULT_RELATED_PREDICATE,
+    _morph_starts,
+    _rotation_key,
     extract_hearst_pairs,
     induce_aliases,
     induce_head_noun_hierarchy,
@@ -90,6 +93,19 @@ def test_spread_is_measured_over_documents_when_known():
 def test_alias_bag_keeps_suffixes_as_parts():
     chunks = {"금융기관": {"c1"}, "금융기관별": {"c1"}}
     assert induce_aliases(list(chunks), chunks) == {}     # "-별" is a part of the name, not a permutation
+
+
+def test_whole_name_key_is_a_rotation_not_a_permutation():
+    # A name the analyzer keeps whole is keyed by its rotation: the two blocks swapped
+    # ("호텔신라" / "신라호텔") share a key, letters merely rearranged do not.
+    assert _rotation_key("호텔신라") == _rotation_key("신라호텔")
+    assert _rotation_key("김민수정") != _rotation_key("김수민정")
+    assert _rotation_key("삼성전자") != _rotation_key("전자삼상")
+    assert len(_rotation_key("호텔신라")) == 1 and _rotation_key("호텔신라")[0].startswith("\x00")
+
+
+def test_morph_cache_is_bounded():
+    assert _morph_starts.cache_parameters()["maxsize"] == _MORPH_CACHE and _MORPH_CACHE > 0
 
 
 def test_related_predicate_is_graph_vocabulary():

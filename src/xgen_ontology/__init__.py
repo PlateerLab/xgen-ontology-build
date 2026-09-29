@@ -96,7 +96,7 @@ from .ontology import Ontology
 from .protocols import LLM, Embedder, GraphSink, GraphStore, Morphology, VectorStore
 from .text import BM25, safe_uri, tokenize
 
-__version__ = "0.12.1"
+__version__ = "0.12.2"
 
 __all__ = [
     # portable knowledge exchange

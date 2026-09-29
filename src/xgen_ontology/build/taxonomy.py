@@ -232,10 +232,14 @@ _HANGUL = ("가", "힣")
 DEFAULT_RELATED_PREDICATE = "relatedTo"   # the neighbour link from name structure; graph vocabulary, not a domain word
 
 
-@lru_cache(maxsize=None)
+_MORPH_CACHE = 1 << 18   # names kept analyzed; bounded so a long-lived process cannot grow without limit
+
+
+@lru_cache(maxsize=_MORPH_CACHE)
 def _morph_starts(text: str) -> frozenset[int] | None:
-    """Morpheme boundaries of a name. Cached: a name is analyzed once per process, so an
-    incremental build pays only for its new names and no name budget is needed."""
+    """Morpheme boundaries of a name. Cached (LRU, bounded): a name is analyzed once while
+    it stays hot, so an incremental build pays only for its new names and no name budget
+    is needed."""
     toks = tokenize(text)
     return frozenset(t.start for t in toks) if toks else None
 
@@ -469,14 +473,25 @@ def _morpheme_bag(name: str) -> tuple[str, ...]:
     order is another thing ("information protection" is not "protected information"),
     and a suffix is a part ("bank-per" is not a spelling of "bank"). So: every morpheme
     but particles, endings and punctuation must be a proper noun (NNP); the parts are
-    those morphemes, or the syllables of a name the analyzer keeps whole."""
+    those morphemes. A name the analyzer keeps whole has no parts to permute, so it is
+    keyed by :func:`_rotation_key` instead: "Hotel Shilla" and "Shilla Hotel" are the
+    same string cut once and swapped, while two names that merely share letters are not."""
     toks = [t for t in (tokenize(name) or ()) if not t.tag.startswith(_BAG_SKIP_PREFIX)]
     if not toks or any(t.tag != "NNP" for t in toks):
         return ()
     if len(toks) >= 2:
         return tuple(sorted(t.form.lower() for t in toks))
     compact = "".join(name.split()).lower()
-    return tuple(sorted(compact)) if len(compact) >= 4 else ()
+    return _rotation_key(compact) if len(compact) >= 4 else ()
+
+
+def _rotation_key(text: str) -> tuple[str, ...]:
+    """The smallest rotation of ``text``, as a one-part bag, so that ``A + B`` and ``B + A``
+    share a key. Only a swap of two blocks maps here; a rearrangement of letters does not
+    (a permuted name is not a rotation), so this is much narrower than a sorted bag."""
+    n = len(text)
+    doubled = text + text
+    return ("\x00" + min(doubled[i:i + n] for i in range(n)),)
 
 
 def induce_aliases(names, chunks_of: dict[str, set[str]]) -> dict[str, str]:
@@ -492,7 +507,7 @@ def induce_aliases(names, chunks_of: dict[str, set[str]]) -> dict[str, str]:
     groups: dict[tuple[str, ...], list[str]] = defaultdict(list)
     for name in dict.fromkeys(n for n in names if n):
         bag = _morpheme_bag(name)
-        if len(bag) >= 2:
+        if bag:
             groups[bag].append(name)
     rename: dict[str, str] = {}
     for members in groups.values():
