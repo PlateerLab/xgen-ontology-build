@@ -145,7 +145,7 @@ def _prose_row(cells: list[str]) -> bool:
         return False
     cased = 0
     for w in words:
-        toks = list(tokenize(w))
+        toks = list(tokenize(w) or ())        # no analyzer: no tags to read, the shape test above decides
         if not toks:
             continue
         if any(t.tag.startswith(_VERBAL_TAGS) for t in toks):
