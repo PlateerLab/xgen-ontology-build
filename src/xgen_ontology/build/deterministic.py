@@ -132,6 +132,32 @@ def parse_html_table(text: str) -> list[list[str]]:
     return out
 
 
+def _prose_row(cells: list[str]) -> bool:
+    """A whitespace row whose words are mostly sentence constituents, not table cells.
+
+    A table cell ends in a noun or a number; a word of running text ends in a
+    particle or an ending, or carries a verb. Judged by morpheme tag, so a
+    regulation paragraph ("Article 1 (Purpose) This guideline ...") cannot pass as
+    a row dump just because its lines do not end with a period.
+    """
+    words = [c for c in cells if len(c) >= 2]
+    if not words:
+        return False
+    cased = 0
+    for w in words:
+        toks = list(tokenize(w))
+        if not toks:
+            continue
+        if any(t.tag.startswith(_VERBAL_TAGS) for t in toks):
+            return True                       # an inflected verb is never a cell
+        if toks[-1].tag[0] in ("J", "E"):
+            cased += 1
+    return cased * 3 >= len(words)            # a third of the words case-marked: a clause, not a row
+
+
+_VERBAL_TAGS = ("VV", "VA", "VX", "VCP", "VCN", "EF", "EC", "ETM", "ETN", "XSV", "XSA")
+
+
 def parse_row_dump(text: str, min_rows: int = 4) -> list[list[str]]:
     """Whitespace-separated rows with no table markup. The column count must be steady across lines."""
     lines = [ln.strip() for ln in (text or "").split("\n")]
@@ -145,7 +171,11 @@ def parse_row_dump(text: str, min_rows: int = 4) -> list[list[str]]:
     widths = Counter(len(r) for r in rows)
     modal, n_modal = widths.most_common(1)[0]
     aligned = sum(c for w, c in widths.items() if abs(w - modal) <= 1)
-    return rows if aligned * 2 > len(rows) and n_modal >= 2 else []
+    if not (aligned * 2 > len(rows) and n_modal >= 2):
+        return []
+    # Lines that read as sentences are not rows, whatever their shape.
+    rows = [r for r in rows if not _prose_row(r)]
+    return rows if len(rows) >= min_rows else []
 
 
 _PIPE_RULE = re.compile(r"^[\s|:\-]+$")
@@ -904,9 +934,30 @@ def extract_as_dicts(
                 _children.setdefault(_head, set()).add(_n)
                 _head_of[_n] = _head
                 break
+    # A head is a concept only when it says what its members are: not a proper noun
+    # (an individual is not a type), and not a word whose compounds are spread over
+    # the whole corpus ("whether", "matter", "standard" head hundreds of names in
+    # every document and classify none of them). The same discriminativeness ratio
+    # that filters entities, applied to the head together with its members.
+    # Spread is measured over documents: a corpus of many documents dilutes any name's
+    # share of chunks, while "whether"-names still turn up in most documents.
+    _n_docs = len(documents or {})
+    _n_chunks = max(1, int(res.get("n_chunks") or 1))
+    _cov_on = _n_chunks >= _COVERAGE_MIN_CHUNKS
+
+    def _generic_head(h: str) -> bool:
+        if not _cov_on:
+            return False
+        covered = set(res["entities"].get(h, ()))
+        for _c in _children.get(h, ()):
+            covered |= set(res["entities"].get(_c, ()))
+        if _n_docs > 1:
+            return len({owner.get(c, c) for c in covered}) / _n_docs > max_coverage
+        return len(covered) / _n_chunks > max_coverage
+
     _head_classes = {h for h, ch in _children.items()
                      if (len(ch) >= _HEAD_MIN_CHILDREN or (h in _names and ch))
-                     and not _is_proper(h)}
+                     and not _is_proper(h) and not _generic_head(h)}
     _head_of = {c: h for c, h in _head_of.items() if h in _head_classes}
     # Names whose head came from before a parenthetical.
     _paren_heads = {

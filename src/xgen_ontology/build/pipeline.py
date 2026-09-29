@@ -45,7 +45,13 @@ from .quality import review_quality
 from .resolve import resolve_entities
 from .retract import retract_chunks
 from .tabular import TABLE_EXTENSIONS, analyze_tables, build_from_tables
-from .taxonomy import DEFAULT_RELATED_PREDICATE, fold_name_fragments, induce_hierarchy, prune_common_words
+from .taxonomy import (
+    DEFAULT_RELATED_PREDICATE,
+    fold_name_fragments,
+    induce_aliases,
+    induce_hierarchy,
+    prune_common_words,
+)
 
 MODES = ("basic", "enrich", "llm")
 
@@ -239,6 +245,19 @@ class OntologyBuilder:
             if rename:
                 Deduplicator._apply_instance(rename, instances, relations, data_values)
                 report.renamed += len(rename)
+            # Synonym layer: spellings of one thing (same morphemes, other order, seen together).
+            chunks_of: dict[str, set[str]] = {}
+            for i in instances:
+                if i.name:
+                    chunks_of.setdefault(i.name, set()).update(c for c in i.source_chunks if c)
+            for c in concepts.classes:
+                if c.name:
+                    chunks_of.setdefault(c.name, set()).update(x for x in c.source_chunks if x)
+            alias = {o: n for o, n in induce_aliases(list(chunks_of), chunks_of).items() if o not in protected}
+            if alias:
+                Deduplicator._apply_instance(alias, instances, relations, data_values)
+                Deduplicator._apply_class(alias, concepts, instances)
+                report.aliased += len(alias)
             report.predicates_merged += merge_predicates(relations, deduper._norm_key)["merged_predicates"]
             report.folded += _apply_fold(concepts, instances, data_values, relations)
             report.pruned += _apply_prune(instances, relations, data_values, self.common_word_rank)
@@ -250,9 +269,17 @@ class OntologyBuilder:
             new_names = None
             if incremental:
                 new_names = ({c.name for c in concepts.classes} | {i.name for i in instances}) - before
+            # Which document each chunk came from, for spread over documents (this call's
+            # documents plus what earlier builds recorded on the chunks).
+            doc_of = {c.id: c.meta["doc"] for c in onto.chunks if c.meta.get("doc")}
+            for name, chs in documents.items():
+                for ch in chs:
+                    doc_of[ch["chunk_id"]] = name
             induced = induce_hierarchy(concepts, prose_texts, instances, relations,
                                        related_predicate=self.related_predicate,
-                                       header_patterns=self.header_patterns, new_names=new_names)
+                                       header_patterns=self.header_patterns, new_names=new_names,
+                                       corpus_chunks=corpus_total, doc_of=doc_of,
+                                       corpus_docs=len(set(doc_of.values())))
             edges = induced["hearst_edges_added"] + induced["compound_edges_added"]
             if edges or induced["typed"] or induced["promoted"]:
                 report.notes.append(
@@ -440,11 +467,11 @@ def _extend_chunks(existing: list[Chunk], documents: dict[str, list[dict]],
                    instances: list[Instance]) -> list[Chunk]:
     """The chunk list with ``documents`` added, entity mentions recomputed from ``instances``."""
     chunks: dict[str, Chunk] = {c.id: c for c in existing}
-    for _name, chs in documents.items():
+    for name, chs in documents.items():
         for ch in chs:
             cid = ch["chunk_id"]
             if cid not in chunks:
-                chunks[cid] = Chunk(id=cid, text=ch.get("chunk_text", ""))
+                chunks[cid] = Chunk(id=cid, text=ch.get("chunk_text", ""), meta={"doc": name})
     for c in chunks.values():
         c.entities = []
     for inst in instances:

@@ -23,10 +23,11 @@ word-boundary-only behavior with no morphological analyzer installed.
 from __future__ import annotations
 
 from collections import defaultdict
+from functools import lru_cache
 
 from ..korean import tokenize
 from ..models import Class, Concepts, Instance, Relation
-from .deterministic import is_common_word, prose_only  # noqa: F401  (re-exported)
+from .deterministic import _COVERAGE_MIN_CHUNKS, is_common_word, prose_only  # noqa: F401  (re-exported)
 
 # ───────────────────────── Hearst patterns ─────────────────────────
 
@@ -39,6 +40,8 @@ _NOUN_TAGS = ("NNG", "NNP", "SL", "SN")
 # enumerated, so the anchor's own inflected forms are caught automatically.
 _SEP_TAGS = ("SP", "MAG")
 _PARTICLE_PREFIX = "J"
+_BRACKET_OPEN, _BRACKET_CLOSE = "SSO", "SSC"          # the analyzer's opening / closing bracket tags
+_MODIFIER_PARTICLES = ("JKB", "JKG", "JC")              # adverbial / adnominal / conjunctive: the noun modifies what follows
 # The anchor word. A Hearst pattern is defined by anchoring on a fixed lexical item
 # (English implementations anchor on "such as" the same way); this is the one word
 # this module hard-codes, and it is a dependent noun meaning roughly "etc./and so on".
@@ -75,8 +78,17 @@ def extract_hearst_pairs(text: str) -> list[tuple[str, str]]:
         return []
     toks = list(toks)
     out: list[tuple[str, str]] = []
+    depth = 0                      # bracket nesting at the current token (opening/closing bracket tags)
     for i, tok in enumerate(toks):
+        if tok.tag == _BRACKET_OPEN:
+            depth += 1
+        elif tok.tag == _BRACKET_CLOSE:
+            depth = max(0, depth - 1)
         if tok.form != _ANCHOR_FORM or tok.tag != _ANCHOR_TAG:
+            continue
+        # Inside brackets the anchor is part of a quoted title ("Act on the Regulation
+        # of Speculative Acts, etc."), not an enumeration in this sentence.
+        if depth > 0:
             continue
 
         # Hypernym: the noun phrase right after the anchor, skipping its particles.
@@ -94,6 +106,11 @@ def extract_hearst_pairs(text: str) -> list[tuple[str, str]]:
         while end < len(toks) and toks[end].tag in _NOUN_TAGS:
             end += 1
         if end < len(toks) and toks[end].tag in ("XSA", "XSV"):
+            continue
+        # The hypernym must be the head of its own phrase. Followed by an adverbial,
+        # adnominal or conjunctive particle ("... etc. work-WITH unrelated sites") it
+        # modifies a later noun, and that noun, not this one, is what the list is.
+        if end < len(toks) and toks[end].tag in _MODIFIER_PARTICLES:
             continue
 
         # Hyponyms: walk backward from the anchor collecting the enumeration.
@@ -210,15 +227,17 @@ def hearst_hierarchy(
 _HEAD_MIN_TAIL = 2      # a head noun needs at least this many characters to mean anything
 _HEAD_MIN_MOD = 2       # same for the modifier in front of it
 _VARIANT_MAX_LEN = 20   # names longer than this are not considered a fragment of another
-_MORPH_BUDGET = 30000   # above this many names, morpheme boundaries are skipped (build time)
 _COMMON_MAX_LEN = 8     # a common-word node is a short single word
 _HANGUL = ("가", "힣")
-DEFAULT_RELATED_PREDICATE = "관련"
+DEFAULT_RELATED_PREDICATE = "relatedTo"   # the neighbour link from name structure; graph vocabulary, not a domain word
 
 
-def _morph_starts(text: str) -> set[int] | None:
+@lru_cache(maxsize=None)
+def _morph_starts(text: str) -> frozenset[int] | None:
+    """Morpheme boundaries of a name. Cached: a name is analyzed once per process, so an
+    incremental build pays only for its new names and no name budget is needed."""
     toks = tokenize(text)
-    return {t.start for t in toks} if toks else None
+    return frozenset(t.start for t in toks) if toks else None
 
 
 def _has_hangul(text: str) -> bool:
@@ -353,6 +372,9 @@ def _touched_by_new(label: str, by_len: dict[int, set], tail2: set, words: set) 
 
 def induce_head_noun_hierarchy(
     labels: list[str], *, class_labels: set[str] | None = None, only: set[str] | None = None,
+    chunks_of: dict[str, set[str]] | None = None, corpus_chunks: int | None = None,
+    max_coverage: float = _DEFAULT_MAX_COVERAGE,
+    doc_of: dict[str, str] | None = None, corpus_docs: int | None = None,
 ) -> tuple[list[tuple[str, str]], dict[str, str], list[tuple[str, str]]]:
     """Names -> ``(subclass edges, sameAs renames, related pairs)``. Zero LLM calls.
 
@@ -377,7 +399,6 @@ def induce_head_noun_hierarchy(
     # Classes first, then longer names first: the order the production store uses.
     uniq.sort(key=lambda lb: (lb not in class_labels, -len(lb)))
     by_label = set(uniq)
-    use_morph = len(uniq) <= _MORPH_BUDGET
     best: dict[str, str] = {}
     same: dict[str, str] = {}
     related: list[tuple[str, str]] = []
@@ -386,7 +407,7 @@ def induce_head_noun_hierarchy(
         if only is not None and cl not in only:
             if not (by_len and _touched_by_new(cl, by_len, tail2, new_words)):
                 continue
-        heads, tails = _boundary_parts(cl, use_morph)
+        heads, tails = _boundary_parts(cl)
         for tail in tails:
             if tail not in by_label or tail == cl or len(tail) < _HEAD_MIN_TAIL or not cl.endswith(tail):
                 continue
@@ -404,8 +425,82 @@ def induce_head_noun_hierarchy(
             if head in by_label and head != cl and head in cl.split():
                 related.append((cl, head))
                 break
+    # A head whose compounds are spread over the corpus ("whether", "matter",
+    # "standard": hundreds of names in every document) says nothing about what its
+    # members are. Those names stay neighbours on a topic instead of a kind and its
+    # type. Same discriminativeness ratio as the entity filter, applied to the head
+    # together with its members; only meaningful once the corpus has some size.
+    if chunks_of:
+        n = int(corpus_chunks or len({c for cs in chunks_of.values() for c in cs}) or 1)
+        # Spread is measured over documents when the chunks' documents are known: a
+        # corpus of many documents dilutes any name's share of chunks, while
+        # "whether"-names still turn up in most documents.
+        n_docs = int(corpus_docs or (len(set(doc_of.values())) if doc_of else 0))
+        if n >= _COVERAGE_MIN_CHUNKS:
+            members: dict[str, list[str]] = defaultdict(list)
+            for child, parent in best.items():
+                members[parent].append(child)
+            generic = set()
+            for parent, kids in members.items():
+                covered = set(chunks_of.get(parent, ()))
+                for k in kids:
+                    covered |= set(chunks_of.get(k, ()))
+                if doc_of and n_docs > 1:
+                    spread = len({doc_of.get(c, c) for c in covered}) / n_docs
+                else:
+                    spread = len(covered) / n
+                if spread > max_coverage:
+                    generic.add(parent)
+            if generic:
+                related.extend((child, parent) for child, parent in best.items() if parent in generic)
+                best = {child: parent for child, parent in best.items() if parent not in generic}
     edges = [(parent, child) for child, parent in best.items()]
     return edges, same, related
+
+
+_BAG_SKIP_PREFIX = ("J", "E", "V", "SP", "SF", "SS", "SE", "SO", "SW")   # particles, endings, copulas/verbs, punctuation: not parts of a name
+
+
+def _morpheme_bag(name: str) -> tuple[str, ...]:
+    """The parts of a name, order removed: every morpheme but particles, endings and
+    punctuation (a suffix such as "-per" or "-ness" is a part: "bank-per" is not a
+    spelling of "bank"), or, for a name the analyzer keeps whole (a lexicalized proper
+    noun such as a company name), its syllables. Two spellings that permute the same
+    parts share a bag."""
+    toks = tokenize(name)
+    parts = [t.form.lower() for t in toks if not t.tag.startswith(_BAG_SKIP_PREFIX)] if toks else []
+    if len(parts) >= 2:
+        return tuple(sorted(parts))
+    compact = "".join(name.split()).lower()
+    return tuple(sorted(compact)) if len(compact) >= 4 else ()
+
+
+def induce_aliases(names, chunks_of: dict[str, set[str]]) -> dict[str, str]:
+    """Spellings of one thing -> ``{variant: canonical}``, from corpus evidence, no dictionary.
+
+    Two names are aliases when they consist of the same content morphemes in another
+    order ("Hotel Shilla" / "Shilla Hotel") **and** the corpus uses both spellings in
+    at least one shared chunk. The canonical spelling is the one used in more chunks,
+    then the shorter one. A single-morpheme name has no order to vary and is never a
+    key. Scale-free: names are grouped by their morpheme bag, so nothing is compared
+    across groups.
+    """
+    groups: dict[tuple[str, ...], list[str]] = defaultdict(list)
+    for name in dict.fromkeys(n for n in names if n):
+        bag = _morpheme_bag(name)
+        if len(bag) >= 2:
+            groups[bag].append(name)
+    rename: dict[str, str] = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=lambda n: (-len(chunks_of.get(n, ())), len(n), n))
+        canon = members[0]
+        canon_chunks = set(chunks_of.get(canon, ()))
+        for variant in members[1:]:
+            if canon_chunks & set(chunks_of.get(variant, ())):
+                rename[variant] = canon
+    return rename
 
 
 def induce_hierarchy(
@@ -419,6 +514,9 @@ def induce_hierarchy(
     related_predicate: str | None = DEFAULT_RELATED_PREDICATE,
     header_patterns=(),
     new_names: set[str] | None = None,
+    corpus_chunks: int | None = None,
+    doc_of: dict[str, str] | None = None,
+    corpus_docs: int | None = None,
 ) -> dict[str, int]:
     """Induce hierarchy in place: Hearst patterns over ``texts``, then name structure over classes *and* instances.
 
@@ -458,8 +556,17 @@ def induce_hierarchy(
 
     class_labels = {c.name for c in concepts.classes if c.name}
     inst_labels = [i.name for i in instances if i.name]
+    chunks_of: dict[str, set[str]] = {}
+    for i in instances:
+        if i.name:
+            chunks_of.setdefault(i.name, set()).update(c for c in i.source_chunks if c)
+    for c in concepts.classes:
+        if c.name:
+            chunks_of.setdefault(c.name, set()).update(x for x in c.source_chunks if x)
     edges, rename, related = induce_head_noun_hierarchy(
-        [*class_labels, *inst_labels], class_labels=class_labels, only=new_names)
+        [*class_labels, *inst_labels], class_labels=class_labels, only=new_names,
+        chunks_of=chunks_of, corpus_chunks=corpus_chunks, max_coverage=max_coverage,
+        doc_of=doc_of, corpus_docs=corpus_docs)
 
     # A head is a concept: an instance used as a head becomes a class (its chunks come along).
     parents = {p for p, _ in edges}

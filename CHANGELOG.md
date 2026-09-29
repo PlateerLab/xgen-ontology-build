@@ -1,3 +1,42 @@
+# 0.12.0 (2026-09-29)
+
+**The build follows the ontology-learning layers, with evidence at each one and no word
+lists or new size caps.** Found by reading a production graph (521 regulation documents,
+174,540 nodes, 24,969 classes): particle-bearing "entities" (`정보가`, `제1항에`), is-a edges
+read out of quoted law titles (`사행행위 ⊂ 규제` from 「사행행위 등 규제 및 처벌특례법」) and
+negated clauses (`도박 ⊂ 업무` from "gambling, ... etc. *unrelated to* work"), and everyday
+words (`여부`, `기준`, `업무`, `사항`) as classes with hundreds of members each: 57% of all
+subClassOf edges had such a parent. All reproduced by rebuilding the same 764 documents here.
+
+- **terms** -- `parse_row_dump` reads the words of a candidate row by morpheme tag: an
+  inflected verb, or a third of the words ending in a particle, makes the line a sentence,
+  not a row. Article-numbered regulation paragraphs no longer pass as tables.
+- **synonyms** -- `induce_aliases` (new, in the pipeline before predicate merge): two names
+  made of the same parts in another order ("호텔신라" / "신라호텔"; parts = every morpheme but
+  particles, endings, copulas and punctuation, or the syllables of a name the analyzer keeps
+  whole) that the corpus uses together in a chunk are one name; the spelling used in more
+  chunks wins. Grouped by part bag, so linear in the number of names. `BuildReport.aliased`.
+- **concepts** -- a head noun is a class only when its compounds are not spread over the
+  corpus: the same discriminativeness ratio that filters entities (30%), measured over
+  *documents* (a corpus of many documents dilutes any name's share of chunks; "whether"-names
+  still appear in most documents). Otherwise its names become `relatedTo` neighbours. Applied
+  in the extractor's head promotion and in `induce_head_noun_hierarchy` (`doc_of`,
+  `corpus_docs`; chunk share when documents are unknown).
+- **taxonomy** -- `extract_hearst_pairs` skips an anchor inside brackets (the analyzer's
+  SSO/SSC tags) and a hypernym followed by an adverbial, adnominal or conjunctive particle
+  (JKB/JKG/JC: it modifies a later noun). Reads tags, not word lists.
+- **relations** -- the neighbour link is `relatedTo` (graph vocabulary), configurable as
+  before through `related_predicate`.
+- The 30,000-name morphology budget is gone: `_morph_starts` is cached per name, so an
+  incremental build pays only for its new names.
+
+764 documents, 51,006 chunks, before -> after: Hearst pairs inside a quoted title 2,003 ->
+9, raw Hearst pairs 51,314 -> 18,056, particle-ending entity names 7.6% -> 3.5% (most of the
+rest are regular names such as 정의, 결과), chunks misread as row dumps 2,247 -> 983, classes
+36,511 -> 30,560, subClassOf edges with an everyday-word parent 16,239 -> 9,770, hierarchy
+edges 26,988 -> 20,303, build time unchanged (1,321 s -> 1,313 s). The former top classes
+(여부 594, 기준 665, 업무 595, 포함 641) are neighbour groups now.
+
 # 0.11.0 (2026-09-28)
 
 **A deleted document leaves the graph as a delta.** The production deletion path
