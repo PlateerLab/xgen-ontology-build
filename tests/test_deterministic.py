@@ -74,6 +74,14 @@ def test_row_dump_is_a_table_and_its_entities_survive():
     assert "여신심사부" in names and "리스크관리부" in names
 
 
+@kiwi_required
+def test_row_dump_with_yes_no_cells_is_still_a_table():
+    table = "\n".join(["상품명 금리 한도 우대", "정기예금 3.5% 1억 없음", "정기적금 3.8% 5천만 있음",
+                       "자유적금 3.2% 3천만 없음", "청약저축 2.8% 2천만 있음", "주택담보 4.1% 5억 없음"])
+    rows = dx.parse_row_dump(table)
+    assert len(rows) == 6 and rows[1][0] == "정기예금"
+
+
 def test_rowspan_colspan_expand_to_grid():
     rows = dx.parse_html_table(JEJU)
     assert all(len(r) == 4 for r in rows)

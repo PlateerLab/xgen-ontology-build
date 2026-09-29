@@ -135,24 +135,23 @@ def parse_html_table(text: str) -> list[list[str]]:
 def _prose_row(cells: list[str]) -> bool:
     """A whitespace row whose words are mostly sentence constituents, not table cells.
 
-    A table cell ends in a noun or a number; a word of running text ends in a
-    particle or an ending, or carries a verb. Judged by morpheme tag, so a
-    regulation paragraph ("Article 1 (Purpose) This guideline ...") cannot pass as
-    a row dump just because its lines do not end with a period.
+    A word of running text ends in a particle or carries a verb. Tables have verb
+    cells too ("있음", "해당함"), so it is a ratio, not one word: a third of the
+    words case-marked, or more than half of them verbal, makes a sentence.
     """
     words = [c for c in cells if len(c) >= 2]
     if not words:
         return False
-    cased = 0
+    cased = verbal = 0
     for w in words:
         toks = list(tokenize(w) or ())        # no analyzer: no tags to read, the shape test above decides
         if not toks:
             continue
-        if any(t.tag.startswith(_VERBAL_TAGS) for t in toks):
-            return True                       # an inflected verb is never a cell
-        if toks[-1].tag[0] in ("J", "E"):
+        if toks[-1].tag[0] == "J":
             cased += 1
-    return cased * 3 >= len(words)            # a third of the words case-marked: a clause, not a row
+        elif any(t.tag.startswith(_VERBAL_TAGS) for t in toks):
+            verbal += 1
+    return cased * 3 >= len(words) or verbal * 2 > len(words)
 
 
 _VERBAL_TAGS = ("VV", "VA", "VX", "VCP", "VCN", "EF", "EC", "ETM", "ETN", "XSV", "XSA")

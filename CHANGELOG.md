@@ -1,3 +1,16 @@
+# 0.12.6 (2026-09-29)
+
+- Hearst pattern, corrected after review: the hypernym is no longer dropped when a
+  particle follows it. The 0.12.x gate on adverbial, adnominal and conjunctive
+  particles also removed correct pairs ("은행, 보험사 등 금융기관에", "금융기관의",
+  "관계기관과"). Only the construction "X와/과 관련" (related to X) is skipped now: a
+  list that is about a relation to X is not a list of kinds of X.
+- Brackets are matched as pairs. A bracket left open by a chunk cut opens nothing, so
+  one "제3조(적용범위" no longer silences every later "등" in the chunk. A quoted title
+  inside a closed pair is still skipped.
+- Row dumps: one verbal cell ("있음", "해당함") no longer turns a table into prose. A row is
+  prose when a third of its words are case-marked or more than half are verbal.
+
 # 0.12.5 (2026-09-29)
 
 - Term layer, corrected after review: a short Latin term ("id", "db", "js", "Go") is a

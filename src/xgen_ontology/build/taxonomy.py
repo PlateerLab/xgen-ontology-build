@@ -41,7 +41,9 @@ _NOUN_TAGS = ("NNG", "NNP", "SL", "SN")
 _SEP_TAGS = ("SP", "MAG")
 _PARTICLE_PREFIX = "J"
 _BRACKET_OPEN, _BRACKET_CLOSE = "SSO", "SSC"          # the analyzer's opening / closing bracket tags
-_MODIFIER_PARTICLES = ("JKB", "JKG", "JC")              # adverbial / adnominal / conjunctive: the noun modifies what follows
+# "X와/과 관련" (related to X): the list is about a relation to X, not kinds of X. The only lexical item besides the anchor.
+_RELATION_PARTICLES = ("와", "과")
+_RELATION_NOUN = "관련"
 # The anchor word. A Hearst pattern is defined by anchoring on a fixed lexical item
 # (English implementations anchor on "such as" the same way); this is the one word
 # this module hard-codes, and it is a dependent noun meaning roughly "etc./and so on".
@@ -57,6 +59,19 @@ _DEFAULT_MAX_COVERAGE = 0.30
 # real is-a relationship (observed on real data: "purchase-cap-compliance is-a
 # essence" from a single, oddly-phrased sentence).
 _DEFAULT_MIN_HYPONYMS = 2
+
+
+def _bracketed(toks) -> list[bool]:
+    """Per token: inside a matched bracket pair. A bracket left open by a chunk cut opens nothing."""
+    inside = [False] * len(toks)
+    stack: list[int] = []
+    for i, t in enumerate(toks):
+        if t.tag == _BRACKET_OPEN:
+            stack.append(i)
+        elif t.tag == _BRACKET_CLOSE and stack:
+            for k in range(stack.pop() + 1, i):
+                inside[k] = True
+    return inside
 
 
 def extract_hearst_pairs(text: str) -> list[tuple[str, str]]:
@@ -78,17 +93,13 @@ def extract_hearst_pairs(text: str) -> list[tuple[str, str]]:
         return []
     toks = list(toks)
     out: list[tuple[str, str]] = []
-    depth = 0                      # bracket nesting at the current token (opening/closing bracket tags)
+    inside = _bracketed(toks)
     for i, tok in enumerate(toks):
-        if tok.tag == _BRACKET_OPEN:
-            depth += 1
-        elif tok.tag == _BRACKET_CLOSE:
-            depth = max(0, depth - 1)
         if tok.form != _ANCHOR_FORM or tok.tag != _ANCHOR_TAG:
             continue
         # Inside brackets the anchor is part of a quoted title ("Act on the Regulation
         # of Speculative Acts, etc."), not an enumeration in this sentence.
-        if depth > 0:
+        if inside[i]:
             continue
 
         # Hypernym: the noun phrase right after the anchor, skipping its particles.
@@ -107,10 +118,8 @@ def extract_hearst_pairs(text: str) -> list[tuple[str, str]]:
             end += 1
         if end < len(toks) and toks[end].tag in ("XSA", "XSV"):
             continue
-        # The hypernym must be the head of its own phrase. Followed by an adverbial,
-        # adnominal or conjunctive particle ("... etc. work-WITH unrelated sites") it
-        # modifies a later noun, and that noun, not this one, is what the list is.
-        if end < len(toks) and toks[end].tag in _MODIFIER_PARTICLES:
+        if (end + 1 < len(toks) and toks[end].form in _RELATION_PARTICLES and toks[end].tag.startswith(_PARTICLE_PREFIX)
+                and toks[end + 1].form == _RELATION_NOUN):
             continue
 
         # Hyponyms: walk backward from the anchor collecting the enumeration.

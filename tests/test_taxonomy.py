@@ -66,6 +66,24 @@ def test_extract_hearst_pairs_reads_hyponym_hypernym():
 
 
 @kiwi_required
+def test_hearst_hypernym_followed_by_a_particle_is_still_the_hypernym():
+    assert ("보험사", "금융기관") in extract_hearst_pairs("은행, 보험사 등 금융기관에 제출하는 서류")
+    assert ("보험사", "금융기관") in extract_hearst_pairs("은행, 보험사 등 금융기관의 임직원은 다음을 지킨다.")
+    assert ("금융감독원", "관계기관") in extract_hearst_pairs("금융위원회, 금융감독원 등 관계기관과 협의하여 정한다.")
+
+
+@kiwi_required
+def test_hearst_relation_to_x_is_not_a_kind_of_x():
+    assert extract_hearst_pairs("오락, 도박 등 업무와 관련이 없는 인터넷 사이트 접속을 금지한다.") == []
+
+
+@kiwi_required
+def test_hearst_unclosed_bracket_does_not_silence_the_rest_of_the_chunk():
+    assert ("적금", "수신상품") in extract_hearst_pairs("제3조(적용범위 이 규정은 예금, 적금 등 수신상품에 적용한다.")
+    assert extract_hearst_pairs("「사행행위 등 규제 및 처벌특례법」에 따른다.") == []
+
+
+@kiwi_required
 def test_hearst_hierarchy_filters_single_occurrence_pairs():
     # "생체시료" has 2 distinct hyponyms (passes min_hyponyms=2); "보호구" has
     # only one and should be filtered regardless of coverage.
