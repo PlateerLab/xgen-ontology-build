@@ -260,7 +260,7 @@ def looks_like_header(cell: str) -> bool:
     t = (cell or "").strip()
     if not t:
         return True
-    if is_value(t) or len(t) > _MAX_HEAD or _latin_fragment(t):
+    if is_value(t) or len(t) > _MAX_HEAD:
         return False
     if _ENUMERATOR.match(t) or _SENT_END.search(t):
         return False
@@ -301,28 +301,20 @@ _AFFIX_TAGS = ("XR", "XSN")         # roots/suffixes attach only after a noun
 
 
 def _phrase_pieces(phrase: str) -> list[str]:
-    """A noun phrase and its word pieces. Pieces give long names a place to attach to."""
+    """A noun phrase and its word pieces. Pieces give long names a place to attach to.
+
+    Only Hangul pieces: a Korean word cut from a noun run is a noun, while a Latin word
+    cut from a phrase may be anything ("of" in a title)."""
     out = [phrase]
     parts = phrase.split()
     if len(parts) > 1:
-        out.extend(parts)
+        out.extend(p for p in parts if any("가" <= ch <= "힣" for ch in p))
     return out
-
-
-def _latin_fragment(name: str) -> bool:
-    """A Latin-script scrap too short to be a word unless it is an acronym: "of", "mm" are
-    scraps of a wrapped line; "IT", "DB", "PC" are names. No letters at all is a scrap too."""
-    letters = [ch for ch in name if ch.isalpha()]
-    if not letters:
-        return True
-    if all(ch.isascii() for ch in letters):
-        return len(letters) < 3 and not name.isupper()
-    return False
 
 
 def _acceptable(name: str) -> bool:
     n = name.strip()
-    return _MIN_NAME <= len(n) <= _MAX_NAME and not _latin_fragment(n)
+    return _MIN_NAME <= len(n) <= _MAX_NAME and any(ch.isalpha() for ch in n)
 
 
 def _morph_tails(name: str) -> list[str]:

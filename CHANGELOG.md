@@ -1,3 +1,12 @@
+# 0.12.5 (2026-09-29)
+
+- Term layer, corrected after review: a short Latin term ("id", "db", "js", "Go") is a
+  name again; only a string with no letter at all is excluded, which is what removes
+  the list number "5.". The scrap words ("of", "mm") are stopped at their source
+  instead: a word cut from a multi-word phrase is a name of its own only when it is
+  Hangul, because a Korean word cut from a noun run is a noun while a Latin word cut
+  from a phrase may be anything. The whole phrase is unaffected.
+
 # 0.12.4 (2026-09-29)
 
 - Term layer: a pipe-table caption must have the shape of a name, the same test an HTML
