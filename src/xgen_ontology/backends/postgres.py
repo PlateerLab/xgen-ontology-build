@@ -1,8 +1,12 @@
 """PostgreSQL adapter: the XGEN graph tables as a sink, a search store and a source for incremental builds.
 
 The production system keeps its graph in three tables (``ontology_nodes``,
-``ontology_edges``, ``ontology_node_chunks``) plus ``ontology_enriched_chunks``
-for the LLM relation pass. :class:`PgGraph` speaks that schema over any DB-API
+``ontology_edges``, ``ontology_node_chunks``), the chunks each relation was stated
+in (``ontology_edge_sources``) and ``ontology_enriched_chunks`` for the LLM
+relation pass. An edge carries its weight (how many times it was asserted) and its
+label (how the document names the relation). The relation vocabulary (names with
+definitions) is kept where the product keeps it: ``ObjectProperty`` rows of
+``ontology_schema``. :class:`PgGraph` speaks that schema over any DB-API
 connection (psycopg 2/3; sqlite for tests), so a library build can be loaded where
 the product reads it, a stored graph can be searched through the
 :class:`~xgen_ontology.protocols.GraphStore` protocol, and it can be loaded back
@@ -16,9 +20,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Any
 
+from ..build.finalize import LEGACY_RELATED_PREDICATE
+from ..build.relation_formation import vocab_name
 from ..build.taxonomy import DEFAULT_RELATED_PREDICATE
 from ..korean import normalize_label
 from ..models import Chunk, Class, Concepts, DataProperty, DataValue, Instance, Node, ObjectProperty, Relation
@@ -37,7 +42,12 @@ _DDL = {
         " UNIQUE (collection_id, uri))",
         "CREATE TABLE IF NOT EXISTS ontology_edges (id BIGSERIAL PRIMARY KEY, collection_id TEXT NOT NULL,"
         " subject_uri TEXT NOT NULL, predicate TEXT, object_uri TEXT, predicate_uri TEXT, edge_kind TEXT,"
-        " edge_weight REAL, UNIQUE (collection_id, subject_uri, predicate, object_uri))",
+        " edge_weight REAL, label TEXT, UNIQUE (collection_id, subject_uri, predicate, object_uri))",
+        "ALTER TABLE ontology_edges ADD COLUMN IF NOT EXISTS label TEXT",
+        "CREATE TABLE IF NOT EXISTS ontology_edge_sources (id BIGSERIAL PRIMARY KEY, collection_id TEXT NOT NULL,"
+        " subject_uri TEXT NOT NULL, predicate TEXT NOT NULL, object_uri TEXT NOT NULL, source_type TEXT NOT NULL,"
+        " source_id TEXT NOT NULL,"
+        " UNIQUE (collection_id, subject_uri, predicate, object_uri, source_type, source_id))",
         "CREATE TABLE IF NOT EXISTS ontology_node_chunks (id BIGSERIAL PRIMARY KEY, collection_id TEXT NOT NULL,"
         " uri TEXT NOT NULL, chunk_id TEXT NOT NULL, UNIQUE (collection_id, uri, chunk_id))",
         "CREATE TABLE IF NOT EXISTS ontology_enriched_chunks (id BIGSERIAL PRIMARY KEY, collection_id TEXT NOT NULL,"
@@ -48,13 +58,24 @@ _DDL = {
         "CREATE INDEX IF NOT EXISTS ix_onc_coll_chunk ON ontology_node_chunks (collection_id, chunk_id)",
         "CREATE INDEX IF NOT EXISTS ix_onc_coll_uri ON ontology_node_chunks (collection_id, uri)",
         "CREATE INDEX IF NOT EXISTS ix_oec_coll ON ontology_enriched_chunks (collection_id)",
+        "CREATE INDEX IF NOT EXISTS ix_oes_coll_source ON ontology_edge_sources (collection_id, source_id)",
+        "CREATE TABLE IF NOT EXISTS ontology_schema (id SERIAL PRIMARY KEY, collection_id VARCHAR(255) NOT NULL,"
+        " element_name VARCHAR(500) NOT NULL, element_type VARCHAR(50) NOT NULL, description TEXT,"
+        " domain_class VARCHAR(500), range_value VARCHAR(500), parent_class VARCHAR(500), source VARCHAR(20))",
     ],
     "sqlite": [
         "CREATE TABLE IF NOT EXISTS ontology_nodes (id INTEGER PRIMARY KEY, collection_id TEXT NOT NULL,"
         " uri TEXT NOT NULL, kind TEXT NOT NULL, label TEXT, attrs TEXT, nkey TEXT, UNIQUE (collection_id, uri))",
         "CREATE TABLE IF NOT EXISTS ontology_edges (id INTEGER PRIMARY KEY, collection_id TEXT NOT NULL,"
         " subject_uri TEXT NOT NULL, predicate TEXT, object_uri TEXT, predicate_uri TEXT, edge_kind TEXT,"
-        " edge_weight REAL, UNIQUE (collection_id, subject_uri, predicate, object_uri))",
+        " edge_weight REAL, label TEXT, UNIQUE (collection_id, subject_uri, predicate, object_uri))",
+        "CREATE TABLE IF NOT EXISTS ontology_edge_sources (id INTEGER PRIMARY KEY, collection_id TEXT NOT NULL,"
+        " subject_uri TEXT NOT NULL, predicate TEXT NOT NULL, object_uri TEXT NOT NULL, source_type TEXT NOT NULL,"
+        " source_id TEXT NOT NULL,"
+        " UNIQUE (collection_id, subject_uri, predicate, object_uri, source_type, source_id))",
+        "CREATE TABLE IF NOT EXISTS ontology_schema (id INTEGER PRIMARY KEY, collection_id TEXT NOT NULL,"
+        " element_name TEXT NOT NULL, element_type TEXT NOT NULL, description TEXT, domain_class TEXT,"
+        " range_value TEXT, parent_class TEXT, source TEXT)",
         "CREATE TABLE IF NOT EXISTS ontology_node_chunks (id INTEGER PRIMARY KEY, collection_id TEXT NOT NULL,"
         " uri TEXT NOT NULL, chunk_id TEXT NOT NULL, UNIQUE (collection_id, uri, chunk_id))",
         "CREATE TABLE IF NOT EXISTS ontology_enriched_chunks (id INTEGER PRIMARY KEY, collection_id TEXT NOT NULL,"
@@ -85,19 +106,20 @@ def graph_rows(ontology, *, translations: dict[str, str] | None = None
 
     ``nodes`` are ``(uri, kind, label, attrs)`` with ``kind`` in concept / property /
     instance and ``attrs`` the node's data values ``{property: [values]}``; ``edges``
-    are ``(subject_uri, predicate, object_uri, predicate_uri, edge_kind, weight)`` with
-    the production edge kinds; ``node_chunks`` are ``(uri, chunk_id)``. Same shape the
-    production ``serialize_graph`` produces from an equivalent build.
+    are ``(subject_uri, predicate, object_uri, predicate_uri, edge_kind, weight, label)``
+    with the production edge kinds; ``node_chunks`` are ``(uri, chunk_id)``. Same shape
+    the production ``serialize_graph`` produces from an equivalent build. The chunks
+    each relation was stated in are :func:`edge_source_rows`.
+
+    A predicate IRI is the predicate itself: relation names are English identifiers
+    (``normalize_graph``). ``translations`` is accepted for compatibility and not used
+    here; :meth:`Ontology.translate <xgen_ontology.Ontology.translate>` still names the
+    RDF export.
     """
-    translations = translations or {}
+    del translations
     c = ontology.concepts
 
     def pred_uri(name: str) -> str:
-        eng = translations.get(name) or translations.get(normalize_label(name))
-        if eng:
-            eng = re.sub(r"[^a-zA-Z0-9]", "", eng)
-            if eng:
-                return DOMAIN_NS + eng[0].lower() + eng[1:]
         return DOMAIN_NS + name
 
     nodes: list[tuple] = []
@@ -115,15 +137,16 @@ def graph_rows(ontology, *, translations: dict[str, str] | None = None
         puri = DOMAIN_NS + (f"{dp.domain}_{dp.name}" if dp.domain else dp.name)
         nodes.append((puri, "property", dp.name, None))
         if dp.domain and dp.domain in class_names:
-            edges.append((class_uri(dp.domain), dp.name, puri, pred_uri(dp.name), "datatypeProperty_schema", 1.0))
+            edges.append((class_uri(dp.domain), dp.name, puri, pred_uri(dp.name), "datatypeProperty_schema", 1.0,
+                          None))
     for op in c.object_properties:
         if op.name and op.domain in class_names and op.range in class_names:
             edges.append((class_uri(op.domain), op.name, class_uri(op.range), pred_uri(op.name),
-                          "objectProperty_schema", 1.0))
+                          "objectProperty_schema", 1.0, None))
     for parent, child in c.class_hierarchy:
         if parent in class_names and child in class_names and parent != child:
             edges.append((class_uri(child), "subClassOf", class_uri(parent), DOMAIN_NS + "subClassOf",
-                          "subClassOf", 1.0))
+                          "subClassOf", 1.0, None))
 
     inst_names: set[str] = set()
     for i in ontology.instances:
@@ -134,7 +157,8 @@ def graph_rows(ontology, *, translations: dict[str, str] | None = None
             nodes.append((u, "instance", i.name, None))
             inst_names.add(i.name)
         if i.class_name and i.class_name in class_names:
-            edges.append((u, "instanceOf", class_uri(i.class_name), DOMAIN_NS + "instanceOf", "instanceOf", 1.0))
+            edges.append((u, "instanceOf", class_uri(i.class_name), DOMAIN_NS + "instanceOf", "instanceOf", 1.0,
+                          None))
         chunks += [(u, cid) for cid in i.source_chunks if cid]
 
     def endpoint(name: str) -> str:
@@ -148,7 +172,7 @@ def graph_rows(ontology, *, translations: dict[str, str] | None = None
                 nodes.append((instance_uri(end), "instance", end, None))
                 inst_names.add(end)
         edges.append((endpoint(r.subject), r.predicate, endpoint(r.object), pred_uri(r.predicate),
-                      "objectProperty", 1.0))
+                      "objectProperty", float(r.weight or 1.0), r.label or None))
         chunks += [(endpoint(r.subject), cid) for cid in r.source_chunks if cid]
         chunks += [(endpoint(r.object), cid) for cid in r.source_chunks if cid]
 
@@ -180,6 +204,24 @@ def graph_rows(ontology, *, translations: dict[str, str] | None = None
         seen_e.add(e[:3])
         uniq_edges.append(e)
     return uniq_nodes, uniq_edges, sorted(set(chunks))
+
+
+def edge_source_rows(ontology) -> list[tuple[str, str, str, str]]:
+    """The chunks each relation was stated in, as the store keeps them: ``(subject_uri, predicate,
+    object_uri, chunk_id)``. Same endpoints as :func:`graph_rows`."""
+    class_names = {cl.name for cl in ontology.concepts.classes if cl.name}
+    inst_names = {i.name for i in ontology.instances if i.name}
+
+    def endpoint(name: str) -> str:
+        return instance_uri(name) if name in inst_names or name not in class_names else class_uri(name)
+
+    out: set[tuple[str, str, str, str]] = set()
+    for r in ontology.relations:
+        if not (r.subject and r.predicate and r.object) or r.predicate_type == "DatatypeProperty":
+            continue
+        su, ou = endpoint(r.subject), endpoint(r.object)
+        out.update((su, r.predicate, ou, str(cid)) for cid in r.source_chunks if cid)
+    return sorted(out)
 
 
 class PgGraph:
@@ -225,16 +267,27 @@ class PgGraph:
             self._x(f"{prefix} VALUES {ph} {suffix}", tuple(params))
 
     def ensure_schema(self) -> None:
-        """Create the four tables (and the read indexes) when they do not exist."""
+        """Create the tables (and the read indexes) when they do not exist. Tables made by an
+        earlier version get the edge ``label`` column and the relation-sources table."""
         for ddl in _DDL[self.dialect]:
             self._x(ddl)
+        if self.dialect == "sqlite" and "label" not in {r[1] for r in self._q("PRAGMA table_info(ontology_edges)")}:
+            self._x("ALTER TABLE ontology_edges ADD COLUMN label TEXT")
 
     # ── sink ──
 
     def write(self, ontology, *, replace: bool = True, translations: dict[str, str] | None = None) -> dict:
         """Store ``ontology``. ``replace`` clears the collection first; otherwise rows are added and a
-        node seen again merges its attributes (the incremental path)."""
-        nodes, edges, chunks = graph_rows(ontology, translations=translations or ontology.translations)
+        node seen again merges its attributes (the incremental path).
+
+        ``ontology`` is the whole graph (an incremental build extends a loaded one), so an edge
+        seen again takes the model's weight, not one more, and keeps its first label. Relations a
+        named relation superseded (``normalize_graph``) leave the table too, and links still under
+        the former neighbour name (``관련``) are renamed to the current one.
+        """
+        del translations
+        nodes, edges, chunks = graph_rows(ontology)
+        sources = edge_source_rows(ontology)
         C = self.collection_id
         if replace:
             self.clear()
@@ -259,17 +312,87 @@ class PgGraph:
                       for u, k, lb, _a in nodes],
                      "ON CONFLICT (collection_id, uri) DO UPDATE SET attrs = COALESCE(excluded.attrs, "
                      "ontology_nodes.attrs)")
+        if not replace:
+            self._rename_legacy_related()
         self._insert("INSERT INTO ontology_edges(collection_id, subject_uri, predicate, object_uri, predicate_uri,"
-                     " edge_kind, edge_weight)", 7, [(C, *e) for e in edges],
-                     "ON CONFLICT (collection_id, subject_uri, predicate, object_uri) DO NOTHING")
+                     " edge_kind, edge_weight, label)", 8, [(C, *e) for e in edges],
+                     "ON CONFLICT (collection_id, subject_uri, predicate, object_uri) DO UPDATE SET"
+                     " edge_weight = excluded.edge_weight, label = COALESCE(ontology_edges.label, excluded.label)")
         self._insert("INSERT INTO ontology_node_chunks(collection_id, uri, chunk_id)", 3,
                      [(C, u, cid) for u, cid in chunks], "ON CONFLICT (collection_id, uri, chunk_id) DO NOTHING")
+        self._insert("INSERT INTO ontology_edge_sources(collection_id, subject_uri, predicate, object_uri,"
+                     " source_type, source_id)", 6, [(C, su, p, ou, "chunk", cid) for su, p, ou, cid in sources],
+                     "ON CONFLICT (collection_id, subject_uri, predicate, object_uri, source_type, source_id)"
+                     " DO NOTHING")
+        if not replace:
+            self._drop_superseded(ontology)
+        self.write_vocabulary(ontology.concepts.object_properties)
         if ontology.enriched_chunks:
             self.mark_enriched(ontology.enriched_chunks)
-        return {"nodes": len(nodes), "edges": len(edges), "node_chunks": len(chunks)}
+        return {"nodes": len(nodes), "edges": len(edges), "node_chunks": len(chunks), "edge_sources": len(sources)}
+
+    def write_vocabulary(self, object_properties) -> int:
+        """Keep the relation vocabulary: an object property named as a vocabulary name, with its
+        definition, as an ``ObjectProperty`` row of ``ontology_schema`` (where the product keeps
+        it, so the next build, the product's or the library's, uses the same names). A name
+        already there gets a definition it lacks; nothing is removed. Returns rows added."""
+        rows = {}
+        for op in object_properties or []:
+            name = vocab_name(op.name)
+            if name and name not in rows:
+                rows[name] = (op.description or "", op.domain or None, op.range or None)
+        if not rows:
+            return 0
+        C = self.collection_id
+        have = {r[0]: r[1] for r in self._q("SELECT element_name, description FROM ontology_schema"
+                                            " WHERE collection_id=? AND element_type='ObjectProperty'", (C,))}
+        new = [(C, n, "ObjectProperty", d, dom, rng) for n, (d, dom, rng) in rows.items() if n not in have]
+        if new:
+            self._insert("INSERT INTO ontology_schema(collection_id, element_name, element_type, description,"
+                         " domain_class, range_value)", 6, new, "")
+        for n, (d, _dom, _rng) in rows.items():
+            if n in have and d and not have[n]:
+                self._x("UPDATE ontology_schema SET description=? WHERE collection_id=? AND"
+                        " element_type='ObjectProperty' AND element_name=?", (d, C, n))
+        return len(new)
+
+    def _rename_legacy_related(self) -> None:
+        """Links stored under the former neighbour name take the current one (a duplicate goes first)."""
+        C = self.collection_id
+        self._x("DELETE FROM ontology_edges WHERE collection_id=? AND predicate=? AND edge_kind='objectProperty'"
+                " AND EXISTS (SELECT 1 FROM ontology_edges c WHERE c.collection_id=ontology_edges.collection_id"
+                "   AND c.predicate=? AND c.subject_uri=ontology_edges.subject_uri"
+                "   AND c.object_uri=ontology_edges.object_uri)",
+                (C, LEGACY_RELATED_PREDICATE, DEFAULT_RELATED_PREDICATE))
+        self._x("UPDATE ontology_edges SET predicate=?, predicate_uri=? WHERE collection_id=? AND predicate=?"
+                " AND edge_kind='objectProperty'",
+                (DEFAULT_RELATED_PREDICATE, DOMAIN_NS + DEFAULT_RELATED_PREDICATE, C, LEGACY_RELATED_PREDICATE))
+
+    def _drop_superseded(self, ontology) -> None:
+        """On an incremental write: a stored relatedTo between two nodes the model links with a named
+        relation was superseded; it leaves with its sources (the model no longer holds it)."""
+        held = {(r.subject, r.object) for r in ontology.relations if r.predicate == DEFAULT_RELATED_PREDICATE}
+        _n, edges, _c = graph_rows(ontology)
+        named = sorted({(su, ou) for su, p, ou, _pu, ek, _w, _lb in edges
+                        if ek == "objectProperty" and p != DEFAULT_RELATED_PREDICATE})
+        if not named:
+            return
+        label_of = {class_uri(cl.name): cl.name for cl in ontology.concepts.classes if cl.name}
+        label_of.update({instance_uri(i.name): i.name for i in ontology.instances if i.name})
+        C = self.collection_id
+        for su, ou in named:
+            for a, b in ((su, ou), (ou, su)):
+                if (label_of.get(a), label_of.get(b)) in held:
+                    continue
+                for t in ("ontology_edge_sources", "ontology_edges"):
+                    self._x(f"DELETE FROM {t} WHERE collection_id=? AND subject_uri=? AND predicate=?"
+                            " AND object_uri=?", (C, a, DEFAULT_RELATED_PREDICATE, b))
 
     def clear(self) -> None:
-        for t in ("ontology_edges", "ontology_nodes", "ontology_node_chunks", "ontology_enriched_chunks"):
+        """Remove the collection's graph, its relation sources and enrich markers, and its schema
+        rows (a rebuild starts its vocabulary over, as the product's does)."""
+        for t in ("ontology_edge_sources", "ontology_edges", "ontology_nodes", "ontology_node_chunks",
+                  "ontology_enriched_chunks", "ontology_schema"):
             self._x(f"DELETE FROM {t} WHERE collection_id=?", (self.collection_id,))
 
     def mark_enriched(self, chunk_ids) -> int:
@@ -283,16 +406,20 @@ class PgGraph:
         return {r[0] for r in self._q("SELECT chunk_id FROM ontology_enriched_chunks WHERE collection_id=?",
                                       (self.collection_id,))}
 
-    def prune_chunks(self, chunk_ids, *, structural_predicates=(DEFAULT_RELATED_PREDICATE, "sameAs")) -> dict:
+    def prune_chunks(self, chunk_ids, *,
+                     structural_predicates=(DEFAULT_RELATED_PREDICATE, LEGACY_RELATED_PREDICATE, "sameAs")) -> dict:
         """Take deleted chunks out of the stored graph: the production deletion delta, on the tables.
 
         Removes the chunks' links and the nodes they were the only evidence for: individuals
         with no link left, classes with no link left that nothing refers to any more (their
         own property declarations and parent link are not references), the property nodes
-        only those classes declared, and every edge touching them. A relation between two
-        surviving nodes that no longer share a chunk has lost its evidence and goes too, except
-        relations made from name structure (``structural_predicates``). The chunks' enrich
-        markers go so a later relation pass does not wait on them. Same rules as
+        only those classes declared, and every edge touching them. A relation with stated
+        source chunks goes when all of them are removed and otherwise keeps the rest, their
+        count as its weight; a
+        relation with none between two surviving nodes that no longer share a chunk has lost
+        its evidence and goes too, except relations made from name structure
+        (``structural_predicates``). The chunks' enrich markers go so a later relation pass
+        does not wait on them. Same rules as
         :func:`~xgen_ontology.build.retract.retract_chunks` on the build models.
 
         Several statements; run them in one transaction (a non-autocommit connection, then
@@ -301,7 +428,7 @@ class PgGraph:
         the same nodes again. Returns ``chunks / links / nodes / edges / enriched`` counts.
         """
         ids = sorted({str(c) for c in (chunk_ids or []) if c})
-        stats = {"chunks": len(ids), "links": 0, "nodes": 0, "edges": 0, "enriched": 0}
+        stats = {"chunks": len(ids), "links": 0, "nodes": 0, "edges": 0, "enriched": 0, "sources": 0}
         if not ids:
             return stats
         C = self.collection_id
@@ -319,21 +446,41 @@ class PgGraph:
             stats["enriched"] = self._x(
                 f"DELETE FROM ontology_enriched_chunks WHERE collection_id=? AND chunk_id IN {gone}", (C,))
             if not stats["links"]:
+                stats["sources"] = self._x(f"DELETE FROM ontology_edge_sources WHERE collection_id=?"
+                                           f" AND source_type='chunk' AND source_id IN {gone}", (C,))
                 return stats
             # the nodes that lose a link are the candidates of the first round
             self._x("INSERT INTO xo_prune_cand(uri) SELECT DISTINCT uri FROM ontology_node_chunks"
                     f" WHERE collection_id=? AND chunk_id IN {gone}", (C,))
-            # relations whose two ends survive but no longer share a chunk outside the removed ones
-            ph = ",".join(["?"] * len(structural_predicates)) or "''"
+            # a relation with stated sources: gone when every one of them is removed
+            same_edge = ("s.collection_id=ontology_edges.collection_id AND s.subject_uri=ontology_edges.subject_uri"
+                         " AND s.predicate=ontology_edges.predicate AND s.object_uri=ontology_edges.object_uri")
             stats["edges"] = self._x(
                 "DELETE FROM ontology_edges WHERE collection_id=? AND edge_kind='objectProperty'"
+                f" AND EXISTS (SELECT 1 FROM ontology_edge_sources s WHERE {same_edge})"
+                f" AND NOT EXISTS (SELECT 1 FROM ontology_edge_sources s WHERE {same_edge}"
+                f"                  AND NOT (s.source_type='chunk' AND s.source_id IN {gone}))", (C,))
+            # a relation without: its two ends survive but no longer share a chunk outside the removed ones
+            ph = ",".join(["?"] * len(structural_predicates)) or "''"
+            stats["edges"] += self._x(
+                "DELETE FROM ontology_edges WHERE collection_id=? AND edge_kind='objectProperty'"
                 f" AND predicate NOT IN ({ph}) AND subject_uri IN {cand} AND object_uri IN {cand}"
+                f" AND NOT EXISTS (SELECT 1 FROM ontology_edge_sources s WHERE {same_edge})"
                 " AND NOT EXISTS (SELECT 1 FROM ontology_node_chunks a"
                 "                  JOIN ontology_node_chunks b ON b.collection_id=a.collection_id"
                 "                   AND b.chunk_id=a.chunk_id AND b.uri=ontology_edges.object_uri"
                 "                  WHERE a.collection_id=ontology_edges.collection_id"
                 f"                   AND a.uri=ontology_edges.subject_uri AND a.chunk_id NOT IN {gone})",
                 (C, *structural_predicates))
+            # a relation that keeps some of its sources: its weight is the evidence left
+            self._x("UPDATE ontology_edges SET edge_weight = (SELECT count(*) FROM ontology_edge_sources s"
+                    f"   WHERE {same_edge} AND NOT (s.source_type='chunk' AND s.source_id IN {gone}))"
+                    " WHERE collection_id=? AND edge_kind='objectProperty'"
+                    f" AND EXISTS (SELECT 1 FROM ontology_edge_sources s WHERE {same_edge}"
+                    f"             AND s.source_type='chunk' AND s.source_id IN {gone})", (C,))
+            # the removed chunks are nobody's source any more (after the judgement above, which needs them)
+            stats["sources"] = self._x(f"DELETE FROM ontology_edge_sources WHERE collection_id=?"
+                                       f" AND source_type='chunk' AND source_id IN {gone}", (C,))
             # nodes the removed chunks were the only evidence for; then, round by round, the classes
             # whose last reference was one of them (a class referenced by nothing, linked to no chunk)
             no_link_left = ("NOT EXISTS (SELECT 1 FROM ontology_node_chunks c WHERE c.collection_id=n.collection_id"
@@ -374,6 +521,11 @@ class PgGraph:
                 stats["nodes"] += self._x(
                     f"DELETE FROM ontology_nodes WHERE collection_id=? AND uri IN {gone_uris}", (C,))
             self._x(f"DELETE FROM ontology_node_chunks WHERE collection_id=? AND chunk_id IN {gone}", (C,))
+            # sources of the edges that went with an orphan node
+            self._x("DELETE FROM ontology_edge_sources WHERE collection_id=? AND NOT EXISTS"
+                    " (SELECT 1 FROM ontology_edges e WHERE e.collection_id=ontology_edge_sources.collection_id"
+                    "   AND e.subject_uri=ontology_edge_sources.subject_uri AND e.predicate=ontology_edge_sources.predicate"
+                    "   AND e.object_uri=ontology_edge_sources.object_uri)", (C,))
         finally:
             for t in ("xo_prune_chunks", "xo_prune_cand", "xo_prune_gone"):
                 try:
@@ -415,9 +567,13 @@ class PgGraph:
         instances: list[Instance] = []
         typed: set[str] = set()
         relations: list[Relation] = []
-        edges = self._q("SELECT subject_uri, predicate, object_uri, edge_kind FROM ontology_edges"
+        sources: dict[tuple[str, str, str], list[str]] = {}
+        for su, p, ou, cid in self._q("SELECT subject_uri, predicate, object_uri, source_id FROM ontology_edge_sources"
+                                      " WHERE collection_id=? AND source_type='chunk' ORDER BY id", (C,)):
+            sources.setdefault((su, p, ou), []).append(cid)
+        edges = self._q("SELECT subject_uri, predicate, object_uri, edge_kind, edge_weight, label FROM ontology_edges"
                         " WHERE collection_id=? ORDER BY id", (C,))
-        for s, p, o, ek in edges:
+        for s, p, o, ek, w, lb in edges:
             if ek == "subClassOf":
                 concepts.class_hierarchy.append((label.get(o, ""), label.get(s, "")))
             elif ek == "instanceOf":
@@ -429,11 +585,24 @@ class PgGraph:
             elif ek == "datatypeProperty_schema":
                 concepts.datatype_properties.append(DataProperty(name=p, domain=label.get(s, "")))
             elif ek == "objectProperty":
-                relations.append(Relation(subject=label.get(s, ""), predicate=p, object=label.get(o, ""),
-                                          source_chunks=sorted(set(chunks_of.get(s, [])) & set(chunks_of.get(o, [])))))
+                relations.append(Relation(subject=label.get(s, ""),
+                                          predicate=DEFAULT_RELATED_PREDICATE if p == LEGACY_RELATED_PREDICATE else p,
+                                          object=label.get(o, ""), source_chunks=sources.get((s, p, o), []),
+                                          label=lb or None, weight=float(w) if w is not None else 1.0))
         for u in label:
             if kind[u] == "instance" and u not in typed and label[u]:
                 instances.append(Instance(name=label[u], source_chunks=chunks_of.get(u, [])))
+        # the relation vocabulary: names with their definitions
+        declared_op = {op.name: op for op in concepts.object_properties}
+        for name, desc, dom, rng in self._q("SELECT element_name, description, domain_class, range_value"
+                                            " FROM ontology_schema WHERE collection_id=?"
+                                            " AND element_type='ObjectProperty' ORDER BY id", (C,)):
+            if name in declared_op:
+                declared_op[name].description = declared_op[name].description or (desc or "")
+            elif name:
+                op = ObjectProperty(name=name, domain=dom or "", range=rng or "", description=desc or "")
+                concepts.object_properties.append(op)
+                declared_op[name] = op
         declared_dp = {dp.name for dp in concepts.datatype_properties}
         data_values: list[DataValue] = []
         for u, a in attrs.items():

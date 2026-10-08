@@ -92,12 +92,14 @@ def test_retract_chunks_rules_evidence_orphans_and_structural_links():
     names = {i.name for i in instances}
     assert names == {"X", "Y", "W"}                                   # Z had no chunk left
     rels = {(r.subject, r.predicate, r.object): r.source_chunks for r in relations}
-    assert ("X", "p", "Y") in rels and rels[("X", "p", "Y")] == ["c2"]   # X and Y still share c2
-    assert ("X", "q", "Z") not in rels                                   # went with Z
+    # X-p-Y was asserted by c1 only: that it is gone takes the relation with it, even
+    # though X and Y still appear together in c2 (c2 never said X-p-Y).
+    assert ("X", "p", "Y") not in rels
+    assert ("X", "q", "Z") not in rels                                   # went with c1 (and Z)
     assert ("X", "관련", "Y") in rels                                     # name structure is not chunk evidence
     assert {(d.entity, d.property) for d in data_values} == {("X", "attr"), ("W", "w_attr")}
     assert {c.name for c in concepts.classes} == {"K", "K2", "P"}     # K is still referenced
-    assert stats["instances"] == 1 and stats["relations"] == 1 and stats["data_values"] == 1
+    assert stats["instances"] == 1 and stats["relations"] == 2 and stats["data_values"] == 1
     assert stats["links"] == 4                                        # X, Y, Z and K each lost c1
 
 
@@ -151,7 +153,9 @@ def test_pg_prune_chunks_evidence_orphans_and_structural_edges_on_the_tables():
     back = pg.load()
     assert {i.name for i in back.instances} == {"X", "Y", "W"}
     rels = {(r.subject, r.predicate, r.object) for r in back.relations}
-    assert ("X", "p", "Y") in rels and ("X", "관련", "Y") in rels and ("X", "q", "Z") not in rels
+    # X-p-Y went with c1, the only chunk that stated it (the same rule as on the build models);
+    # the name-structure link stays, read under the current neighbour name.
+    assert ("X", "p", "Y") not in rels and ("X", "relatedTo", "Y") in rels and ("X", "q", "Z") not in rels
     assert {c.name for c in back.concepts.classes} == {"K", "K2", "P"}
     pg.prune_chunks(["c9"])
     back = pg.load()
@@ -159,3 +163,24 @@ def test_pg_prune_chunks_evidence_orphans_and_structural_edges_on_the_tables():
     assert pg.counts()["property"] == 1                                # K2's own property node went with it
     pg.prune_chunks(["c2"])
     assert pg.counts() == {"concept": 0, "instance": 0, "property": 0, "edges": 0, "chunks": 0}
+
+
+def test_a_relation_keeps_the_sources_that_survive():
+    rels = [Relation(subject="A", predicate="p", object="B", source_chunks=["c1", "c2"]),
+            Relation(subject="A", predicate="relatedTo", object="B", label="담당", source_chunks=["c1"])]
+    insts = [Instance(name="A", source_chunks=["c1", "c2"]), Instance(name="B", source_chunks=["c1", "c2"])]
+    stats = retract_chunks(Concepts(), insts, rels, [], ["c1"], structural_predicates=("relatedTo", "sameAs"))
+    by = {(r.subject, r.predicate, r.object): r for r in rels}
+    assert by[("A", "p", "B")].source_chunks == ["c2"]
+    # a relatedTo with sources (a table row's link) is evidence-backed, not name structure
+    assert ("A", "relatedTo", "B") not in by and stats["relations"] == 1
+    # the same on the tables, where the weight follows the sources left
+    pg = _pg()
+    rels = [Relation(subject="A", predicate="p", object="B", source_chunks=["c1", "c2"], weight=2.0),
+            Relation(subject="A", predicate="relatedTo", object="B", label="담당", source_chunks=["c1"])]
+    insts = [Instance(name="A", source_chunks=["c1", "c2"]), Instance(name="B", source_chunks=["c1", "c2"])]
+    pg.write(Ontology(concepts=Concepts(), instances=insts, relations=rels))
+    pg.prune_chunks(["c1"])
+    back = {(r.subject, r.predicate, r.object): r for r in pg.load().relations}
+    assert ("A", "relatedTo", "B") not in back
+    assert back[("A", "p", "B")].source_chunks == ["c2"] and back[("A", "p", "B")].weight == 1.0

@@ -60,10 +60,28 @@ onto = build_from_files(["policy.pdf", "products.csv"])
 onto.report.llm_calls            # 0
 onto.report.quality["score"]     # graph-reviewer score of the finished build
 
-# an LLM is optional: mode="enrich" adds relations between the extracted entities,
-# mode="llm" is full LLM extraction of schema and instances
+# an LLM is optional: mode="enrich" names the relations between the entities the base
+# build found, sentence by sentence and row by row, from one vocabulary of relation names;
+# mode="llm" is the older full LLM extraction of schema and instances
 llm = CallableLLM(lambda p, system="": my_model(system, p))     # OpenAI / Anthropic / vLLM / …
 onto = build_from_text("Rule A applies to Acme Bank since 2020. ...", llm=llm, mode="enrich")
+```
+
+The enrich pass sends only what can hold a relation: a unit of evidence (a sentence, a
+clause, a table row) that mentions two or more of the graph's nodes, with the mentions
+numbered. The model answers with numbers and a relation name from the vocabulary, so a
+relation always points at the chunk that states it, and the number of calls is known
+before the first one:
+
+```python
+from xgen_ontology import OntologyBuilder, KO_RELATION_PROMPTS
+
+builder = OntologyBuilder(llm, mode="enrich",
+                          relation_prompts=KO_RELATION_PROMPTS,   # the product's prompts; English by default
+                          char_budget=10000, max_output_tokens=8192, max_workers=4)
+onto = builder.build(docs)
+onto.report.relation_stats      # units, calls, relations, vocabulary, new_vocabulary, lost_chunks, ...
+[(op.name, op.description) for op in onto.concepts.object_properties]   # the vocabulary
 ```
 
 ## Two halves of the lifecycle
@@ -76,15 +94,16 @@ The pipeline is a sequence of independently-importable, backend-agnostic stages:
 |------|--------------|
 | **parse** | extract text from files — txt/md/html/csv built-in (zero-dep), pdf/docx/xlsx via `[files]` |
 | **chunk** | boundary-aware chunking (paragraph→sentence→char) with overlap, stable chunk ids for provenance |
-| **tabular** | table files → ontology with **no LLM**: table→Class, FK→ObjectProperty (same-name / normalized-name / value-overlap detection), column→DataProperty, dimension rows→instances (the name column is judged from the data; rows with the same name are told apart by their key); large fact/junction tables and tables with no name column stay schema-only |
-| **deterministic** | documents → ontology with **no LLM** (`mode="basic"`, the default): HTML tables, whitespace row dumps and pipe grids become row entities typed by the subject column's header, with value cells as attributes and entity cells as relations (headers carry across chunk boundaries, unit rows annotate columns, codes/glosses/decorative parentheses are stripped from names); prose yields noun-phrase entities and (entity, attribute, value) facts; a shared head noun promotes to a class; names appearing in more than 30% of chunks are dropped as non-discriminative. A whitespace block only counts as a row dump when its words are cells (nouns, numbers) rather than sentence constituents, judged by morpheme tag, so an article-numbered regulation paragraph never turns into a table of particle-bearing "entities" |
-| **extract** | the LLM paths: `mode="enrich"` asks only for relations between the entities the base build found (choosing from the predicates already in use); `mode="llm"` is full extraction of schema *and* instances per chunk batch, tagged to source chunks. Junk (base64/degenerate) filtered first; unit-notation magnitudes verified against the source; structured-output JSON schema available |
-| **taxonomy** | hierarchy **without an LLM**: Hearst patterns in prose ("X, Y 등의 Z" → Z is-a X, Z is-a Y), read from the sentence: an anchor inside a quoted title is skipped, and only a hypernym that heads its own phrase counts (after "… etc. work-*with* unrelated sites" the list is about the sites, not the work). Then name structure over classes *and* instances: a boundary-aligned head noun is the parent ("상임감사실" → is-a "감사실"; an instance is typed by its head, a name used as a head becomes a class), a code-prefixed spelling folds into its canonical name, a shared leading word links neighbours. A head whose compounds are spread over the corpus ("whether", "matter", "standard" head hundreds of names in every document) is not a type: its names become `relatedTo` neighbours instead, by the same discriminativeness ratio that filters entities. Before that, name fragments that never stood alone are folded back into their source name and unlinked everyday words are dropped. Off with `hierarchy=False` |
-| **govern** | predicate governance: strip a subject/object noun glued into the predicate, fold surface variants, anchor to the schema and to predicates already in use; vote relation direction by (subject type, object type) majority; merge predicates that share a stem or whose extension is contained in another's |
-| **dedup** | merge synonymous names — content-morpheme keys for instances (shortest spelling wins), (domain, range, key) groups for properties, LLM synonym groups (`mode="enrich"` only), embedding cosine clusters when an embedder is given |
+| **tabular** | table files → ontology with **no LLM**: table→Class, FK→ObjectProperty (same-name / normalized-name / value-overlap detection; serial numbers that merely overlap are not a key, and the direction comes from which side is a primary key), column→DataProperty, dimension rows→instances (the name column is judged from the data; rows with the same name are told apart by their key); large fact/junction tables and tables with no name column stay schema-only. Each sheet of a workbook is a table of its own; HTML tables (row and column spans expanded), CSV and TSV are read; a header row repeated down the table is skipped |
+| **deterministic** | documents → ontology with **no LLM** (`mode="basic"`, the default): HTML tables, whitespace row dumps and pipe grids become row entities typed by the subject column's header, with value cells as attributes and entity cells as relations (headers carry across chunk boundaries, unit rows annotate columns, codes/glosses/decorative parentheses are stripped from names); prose yields noun-phrase entities and (entity, attribute, value) facts; a shared head noun promotes to a class; names appearing in more than 30% of chunks are dropped as non-discriminative. A whitespace block only counts as a row dump when its words are cells (nouns, numbers) rather than sentence constituents, judged by morpheme tag, so an article-numbered regulation paragraph never turns into a table of particle-bearing "entities". Record dumps (`key: value` lines) read as one row. Whether a string can be a name is judged by its shape in Unicode categories (it has a letter, it is not a sentence, its brackets are balanced), never by a word list; HTML entities and escaped pipes are decoded first. An entity cell becomes a `relatedTo` relation labelled with its column name, for the enrich pass to name |
+| **relation formation** | `mode="enrich"`, the product's relation pass: documents are cut into units of evidence and the nodes each unit mentions are numbered (deterministic); units are batched by an input budget and by the expected size of the answer, learnt as calls come back; relation names come from a vocabulary of English identifiers with definitions, defined first from units sampled across the corpus when the graph has none. An answer is rows of numbers (unit, subject, relation, object); a cut-off answer keeps its complete part and the batch is halved, an empty one is retried, a row that does not hold together is dropped. Names used often enough outside the vocabulary (a natural break in their frequencies) join it; at the end of the build every name is held to the vocabulary, and the rest become `relatedTo` with the old name as label. A chunk no answer came back for is asked again by the next `extend` |
+| **extract** | `mode="llm"`, the older path: full extraction of schema *and* instances per chunk batch, tagged to source chunks. Junk (base64/degenerate) filtered first; unit-notation magnitudes verified against the source; structured-output JSON schema available |
+| **taxonomy** | hierarchy **without an LLM**: Hearst patterns in prose ("X, Y 등의 Z" → Z is-a X, Z is-a Y), read from the sentence: an anchor inside a quoted title is skipped, and only a hypernym that heads its own phrase counts (after "… etc. work-*with* unrelated sites" the list is about the sites, not the work). Then name structure over classes *and* instances: a boundary-aligned head noun is the parent ("상임감사실" → is-a "감사실"; an instance is typed by its head, a name used as a head becomes a class), a code-prefixed spelling folds into its canonical name, a shared leading word links neighbours. A head whose compounds are spread over the corpus ("whether", "matter", "standard" head hundreds of names in every document) is not a type: its names become `relatedTo` neighbours instead, by the same discriminativeness ratio that filters entities. Names an earlier step had already typed by that head count toward its spread and are retyped as neighbours too; a table's own class is left as it is. Before that, name fragments that never stood alone are folded back into their source name and unlinked everyday words are dropped. Off with `hierarchy=False` |
+| **govern** | predicate governance for `mode="llm"`: strip a subject/object noun glued into the predicate, fold surface variants, anchor to the schema and to predicates already in use; vote relation direction by (subject type, object type) majority. `merge_predicates` is deprecated: relation names are held to a vocabulary instead |
+| **dedup** | merge synonymous names — content-morpheme keys for instances (shortest spelling wins), LLM class synonym groups (`mode="enrich"` only), embedding cosine clusters of class names when an embedder is given. Relation names are not merged here |
 | **hierarchy** | keep only genuine is-a edges ("being linked is not being a subclass"), break cycles, repair instances typed by a class of their own name, materialize inherited properties onto subclasses |
-| **normalize** | the store-loading rules: a class must look like a class name; a relation named with graph vocabulary (`type`, `instanceOf`, `subClassOf`, `sameAs`) is a typing statement; a relation whose predicate is a declared datatype property or whose object is a value is an attribute; a subject that is a value is dropped; anything referenced is declared (no dangling endpoints) |
-| **retract** | a deleted document leaves as a delta, not a rebuild: its chunks' links go, then whatever they were the only evidence for. An individual with no chunk left; a class with no chunk left that nothing refers to any more (its own declarations do not count), evaluated to a fixpoint so a class whose only individual or subclass went goes too; the properties only those classes declared; a relation whose two ends no longer share a chunk (links made from name structure, the "related" neighbour and `sameAs`, are not chunk evidence and stay). Same rules on the build models (`retract_chunks`) and on the graph tables (`PgGraph.prune_chunks`); the post-build then runs over the surviving corpus |
+| **normalize** | the store-loading rules: a class must look like a class name; a relation named with graph vocabulary (`type`, `instanceOf`, `subClassOf`, `sameAs`) is a typing statement; a relation whose predicate is a declared datatype property or whose object is a value is an attribute; a subject that is a value is dropped. A relation name is an English identifier: an ASCII name is camelCased, anything else becomes `relatedTo` with the original as its label. An endpoint is an existing instance or a declared class, else a new instance only when it has the shape of an entity; the same relation stated twice is one relation whose sources are the union and whose weight is the number of chunks that state it; a pair that has a named relation drops its `relatedTo` |
+| **retract** | a deleted document leaves as a delta, not a rebuild: its chunks' links go, then whatever they were the only evidence for. An individual with no chunk left; a class with no chunk left that nothing refers to any more (its own declarations do not count), evaluated to a fixpoint so a class whose only individual or subclass went goes too; the properties only those classes declared; a relation whose sources (the chunks that state it) are all gone, keeping the rest when some survive; a relation with no recorded sources goes when its two ends no longer share a chunk (links made from name structure, the `relatedTo` neighbour and `sameAs`, are not chunk evidence and stay). Same rules on the build models (`retract_chunks`) and on the graph tables (`PgGraph.prune_chunks`); the post-build then runs over the surviving corpus |
 | **quality** | a graph-reviewer score: completeness · integrity · grounding · shape, recorded on `onto.report.quality` |
 | **resolve** | (off by default) fuzzy entity resolution: fold similar surface forms, *guarding* dates/ids and number-conflicting names |
 | **community** | Louvain modularity clustering (pure Python) |
@@ -163,9 +182,13 @@ onto.search("…")                                  # or search a remote store v
 it works on **any** SPARQL 1.1 endpoint — not just jena-text.
 
 The production system keeps its graph in PostgreSQL (`ontology_nodes` /
-`ontology_edges` / `ontology_node_chunks`). `PgGraph` speaks that schema over any
-DB-API connection (psycopg 2/3; sqlite in the tests), so a library build lands where
-the product reads it, and a stored graph can be searched or extended:
+`ontology_edges` / `ontology_node_chunks`, with `ontology_edge_sources` for the chunks
+that state each relation and `ontology_schema` for the relation vocabulary). `PgGraph`
+speaks that schema over any DB-API connection (psycopg 2/3; sqlite in the tests), so a
+library build lands where the product reads it, and a stored graph can be searched or
+extended. An edge carries its weight and its label (the column name or the document's
+own word for the relation); an appending write renames the legacy `관련` edges to
+`relatedTo` and drops a `relatedTo` edge whose pair now has a named relation:
 
 ```python
 import psycopg
@@ -179,6 +202,7 @@ onto = pg.load()                          # back into build models (chunk ids on
 OntologyBuilder().extend(onto, more_docs) # incremental
 pg.write(onto, replace=False)             # append; a node seen again merges its attributes
 pg.prune_chunks(deleted_chunk_ids)        # a deleted document, applied as a delta on the tables
+                                          # (a relation goes with the last chunk that states it)
 
 onto.search(...)                          # or GraphRAG(pg, vector_store, llm) straight on the tables
 ```
@@ -234,11 +258,13 @@ src/xgen_ontology/
     chunk.py         # boundary-aware chunking
     tabular.py       # table file -> ontology (no LLM)
     deterministic.py # document -> ontology from structure (no LLM): tables, row dumps, prose
-    extract.py       # document -> ontology with an LLM (relations-only enrich / full)
+    relation_units.py     # units of evidence and the numbered mentions in them (no LLM)
+    relation_formation.py # enrich: relations named unit by unit from one vocabulary
+    extract.py       # document -> ontology with an LLM (full extraction; enrich delegates)
     resolve.py       # fuzzy entity resolution (off by default)
     taxonomy.py      # hierarchy without an LLM: Hearst patterns + name structure, fragment folding
-    govern.py        # predicate governance, direction vote, stem / co-extension merge
-    dedup.py         # rule + LLM + vector dedup
+    govern.py        # predicate governance and direction vote (mode="llm")
+    dedup.py         # rule + LLM + vector dedup of instances and classes
     hierarchy.py     # is-a cleaning, self-typed repair, property inheritance
     finalize.py      # graph normalization (the store-loading rules)
     retract.py       # deleted chunks out of the graph as a delta (evidence, orphans, structural links)

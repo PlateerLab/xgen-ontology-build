@@ -14,12 +14,23 @@ extraction degrades to nothing rather than raising.
 from __future__ import annotations
 
 import html
+import json
 import re
 from collections import Counter
 from functools import lru_cache
 from typing import Any, NamedTuple
 
-from ..korean import is_sentence_like, normalize_label, normalize_text, tokenize
+from ..korean import (
+    SENT_END,
+    is_marker_char,
+    is_name_shape,
+    is_sentence_like,
+    normalize_label,
+    normalize_text,
+    starts_with_list_marker,
+    strip_closers,
+    tokenize,
+)
 from ..models import Class, Concepts, DataProperty, DataValue, Instance, Relation
 
 _CELL_TAG = re.compile(r"<t[dh]\b([^>]*)>(.*?)</t[dh]>", re.S)      # (attrs, body)
@@ -30,7 +41,7 @@ _TAG = re.compile(r"<[^>]+>")
 _META = re.compile(r"<Document-Metadata>.*?</Document-Metadata>", re.S)
 _MARKER = re.compile(r"\[(?:Image|Page Number)[^\]]*\]")
 # Sentence-final punctuation. A table cell does not end like a sentence.
-_SENT_END = re.compile(r"[.!?。！？]\Z")
+_SENT_END = SENT_END
 # Affixes that only change the form, not the meaning, are not glued onto a name.
 _AFFIX_SKIP = {"적", "들"}
 # A number followed by at most one short unit and one short qualifier is a value.
@@ -39,6 +50,12 @@ _DATE = re.compile(r"^\d{4}[-./]\d{1,2}([-./]\d{1,2})?$")
 
 _MIN_NAME, _MAX_NAME = 2, 40
 _COVERAGE_MIN_CHUNKS = 20   # below this the discriminativeness ratio is not applied
+# The discriminativeness cap: a name found in a larger share of the chunks (or documents)
+# than this tells nothing apart. One value for extraction, hierarchy and the builder.
+MAX_COVERAGE = 0.30
+# A relation whose name is not known yet. A table's column name stays as its label; the
+# relation's name is chosen by relation formation.
+RELATED_PREDICATE = "relatedTo"
 _HEAD_MIN_CHILDREN = 2      # a head with this many names under it is a concept (class)
 _MAX_ROW_LABEL = 80         # cap on a row label built from its identifying cells
 _MAX_HEAD = 40              # cap on a column name; longer is a cell value
@@ -46,8 +63,10 @@ _CLASS_MAX_TOKENS = 6       # cap on class-name words; longer is a sentence
 _PAIR_HEAD, _PAIR_TAIL = 4, 6      # entities per row to pair up
 _HEADER_SCAN = 3                   # title / subtitle lines above a table
 _ROW_DUMP_MIN_COLS = 4             # minimum columns for a line to count as a row dump
-# Cells that start with an enumerator: (가) (1) [A] and bullet glyphs.
-_ENUMERATOR = re.compile(r"^\s*(?:[\(\[（]\s*[가-힣a-zA-Z0-9]{1,3}\s*[\)\]）]|[□■○●◦▣▶※•])")
+# Cells that start with an enumerator: (가) (1) [A]. Bullet glyphs are is_marker_char's.
+_ENUMERATOR = re.compile(r"^\s*[\(\[（]\s*[가-힣a-zA-Z0-9]{1,3}\s*[\)\]）]")
+# One {"key": value} line of a record dump (JSON and the like).
+_MEMBER = re.compile(r'^\s*"((?:[^"\\]|\\.)+)"\s*:\s*(.*?)\s*,?\s*$')
 
 DEFAULT_COMMON_WORD_RANK = 5000
 
@@ -163,30 +182,40 @@ def parse_row_dump(text: str, min_rows: int = 4) -> list[list[str]]:
     cand = [ln for ln in lines if len(ln.split()) >= _ROW_DUMP_MIN_COLS]
     if len(cand) < min_rows:
         return []
-    # If most lines end like sentences, this is prose, not a table.
-    if sum(1 for ln in cand if _SENT_END.search(ln)) * 2 > len(cand):
+    # A table row is neither a sentence nor a list item. If most lines are, this is prose
+    # (a full stop behind a closing quote, bracket or comma counts too).
+    if sum(1 for ln in cand if _SENT_END.search(strip_closers(ln)) or starts_with_list_marker(ln)) * 2 > len(cand):
         return []
     rows = [ln.split() for ln in cand]
-    widths = Counter(len(r) for r in rows)
-    modal, n_modal = widths.most_common(1)[0]
-    aligned = sum(c for w, c in widths.items() if abs(w - modal) <= 1)
-    if not (aligned * 2 > len(rows) and n_modal >= 2):
+    modal, n_modal = Counter(len(r) for r in rows).most_common(1)[0]
+    # A table has the same number of columns on every line: the modal width must hold a
+    # majority of the lines, and only those lines are rows.
+    if n_modal * 2 <= len(rows):
         return []
     # Lines that read as sentences are not rows, whatever their shape.
-    rows = [r for r in rows if not _prose_row(r)]
+    rows = [r for r in rows if len(r) == modal and not _prose_row(r)]
     return rows if len(rows) >= min_rows else []
 
 
 _PIPE_RULE = re.compile(r"^[\s|:\-]+$")
+_CELL_PIPE = re.compile(r"(?<!\\)\|")   # a cell boundary; a pipe inside a cell is written \|
+
+
+def _pipe_cells(line: str) -> list[str]:
+    s = line.strip().lstrip("|")
+    while s.endswith("|") and not s.endswith("\\|"):
+        s = s[:-1]
+    return [c.strip().replace("\\|", "|") for c in _CELL_PIPE.split(s)]
 
 
 def parse_pipe_table(text: str) -> list[list[str]]:
-    """Pipe-drawn (markdown-style) table -> grid. Rule lines dropped, outer pipes stripped."""
+    """Pipe-drawn (markdown-style) table -> grid. Rule lines dropped, outer pipes stripped,
+    an escaped pipe (\\|) kept inside its cell."""
     rows: list[list[str]] = []
     for line in (text or "").splitlines():
         if "|" not in line or _PIPE_RULE.match(line):
             continue
-        rows.append([c.strip() for c in line.strip().strip("|").split("|")])
+        rows.append(_pipe_cells(line))
     if len(rows) < 2:
         return []
     width = Counter(len(r) for r in rows).most_common(1)[0][0]
@@ -254,21 +283,39 @@ def unit_row(rows: list[list[str]], idx: int) -> bool:
     return bool(below) and sum(1 for v in below if is_value(v)) >= len(below) * _UNIT_VALUE_RATIO
 
 
+def _header_shape(t: str) -> bool:
+    """The shape a column name and a table title share: not too long, not starting with an
+    enumerator or a bullet, shaped like a name (no sentence end, brackets paired), and not a
+    long phrase with digits in it."""
+    if len(t) > _MAX_HEAD or _ENUMERATOR.match(t) or is_marker_char(t[0]) or not is_name_shape(t):
+        return False                    # an item, a sentence or a cut bracket: a cell that was split
+    return not (len(t.split()) >= 5 and any(ch.isdigit() for ch in t))
+
+
 def looks_like_header(cell: str) -> bool:
-    """Column-name shaped: not a value, enumerator, sentence end, or a long digit-laden phrase."""
+    """Column-name shaped: not a value, and :func:`_header_shape`."""
     t = (cell or "").strip()
     if not t:
         return True
-    if is_value(t) or len(t) > _MAX_HEAD:
-        return False
-    if _ENUMERATOR.match(t) or _SENT_END.search(t):
-        return False
-    if t.count("(") != t.count(")") or t.count("[") != t.count("]"):
-        return False                    # unbalanced brackets: a cell that was split
-    toks = t.split()
-    if len(toks) >= 5 and any(ch.isdigit() for ch in t):
-        return False
-    return True
+    return not is_value(t) and _header_shape(t)
+
+
+def _names_something(t: str) -> bool:
+    """Does it hold a word that names something (a common or proper noun, a foreign word or
+    hanja)? A line of numbers, counts and units (bound nouns) does not. Without an analyzer,
+    any letter counts."""
+    toks = tokenize(t)
+    if toks is None:
+        return any(ch.isalpha() for ch in t)
+    return any(tok.tag in ("NNG", "NNP", "SL", "SH") for tok in toks)
+
+
+def _is_table_title(t: str) -> bool:
+    """Can the line above a table name it? The column-name shape test, but with "names
+    something" in place of the value test: the value test reads "number + short word" and
+    so takes a title like "3분기 예산" for a value. A bare number ("5."), a count or a unit
+    is still not a title."""
+    return bool(t) and _header_shape(t) and _names_something(t)
 
 
 def table_caption(text: str) -> str:
@@ -289,7 +336,7 @@ def table_caption(text: str) -> str:
         if _SENT_END.search(raw):
             continue
         t = normalize_label(raw)
-        if (t and _MIN_NAME <= len(t) <= _MAX_HEAD and looks_like_header(t)
+        if (t and _MIN_NAME <= len(t) <= _MAX_HEAD and _is_table_title(t)
                 and len(t.split()) <= 8 and not is_sentence_like(t)):
             return t
     return ""
@@ -313,7 +360,7 @@ def _phrase_pieces(phrase: str) -> list[str]:
 
 def _acceptable(name: str) -> bool:
     n = name.strip()
-    return _MIN_NAME <= len(n) <= _MAX_NAME and any(ch.isalpha() for ch in n)
+    return _MIN_NAME <= len(n) <= _MAX_NAME and any(ch.isalpha() for ch in n) and is_name_shape(n)
 
 
 def _morph_tails(name: str) -> list[str]:
@@ -341,26 +388,27 @@ def _is_proper(name: str) -> bool:
 
 _SHEET_MARK = re.compile(r"^\[\s*Sheet\s*:\s*(.+?)\s*\]$")
 _BRACKET_MARK = re.compile(r"^[\[(（].*[\])）]$")
+_TABLE_MARK = re.compile(r"^\[Table\s*\d+\]\s*")   # a "[Table 2] title" line: the title alone is the name
 
 
 def _pipe_caption(text: str) -> str:
     """The title line above a pipe table (markdown heading included) is the table's name.
 
-    The same shape test as an HTML caption: a list number ("5."), a value or a sentence
-    above the table is not its name. On a 764-document corpus a bare "5." had become a
-    class with 574 rows as its instances this way."""
+    The same test as an HTML caption: a list number ("5."), a count or unit alone, or a
+    sentence above the table is not its name. On a 764-document corpus a bare "5." had
+    become a class with 574 rows as its instances this way."""
     head = ""
     for line in (text or "").splitlines():
         if "|" in line:
             break
-        raw = line.lstrip("#").strip()
+        raw = _TABLE_MARK.sub("", line.lstrip("#").strip())
         m = _SHEET_MARK.match(raw)
         if m:
             raw = m.group(1)
         elif _BRACKET_MARK.match(raw):
             continue
         t = normalize_label(raw)
-        if t and _MIN_NAME <= len(t) <= _MAX_HEAD and looks_like_header(t) and not is_sentence_like(t):
+        if t and _MIN_NAME <= len(t) <= _MAX_HEAD and _is_table_title(t) and not is_sentence_like(t):
             head = t
     return head
 
@@ -395,7 +443,13 @@ def _noun_phrases(text: str, toks=None) -> list[tuple[str, bool]]:
         start, n_tokens = None, 0
 
     affix = False
+    prev_tok = None
     for tok in list(toks) + [None]:
+        # A word glued to a number with no space (제2장, 3개월, 제2금융권) belongs to the
+        # count or the numbering, so it does not start a name.
+        after_number = (tok is not None and prev_tok is not None and prev_tok.tag == "SN"
+                        and prev_tok.start + prev_tok.len == tok.start)
+        prev_tok = tok
         joins = (tok is not None and tok.tag in _AFFIX_TAGS
                  and start is not None and tok.form not in _AFFIX_SKIP)
         if tok is not None and (tok.tag in _NOUN_TAGS or joins):
@@ -407,6 +461,9 @@ def _noun_phrases(text: str, toks=None) -> list[tuple[str, bool]]:
                     affix = False
                     continue            # an affix at line start has nothing to attach to
             if start is None:
+                if after_number:
+                    prev_end, prev_tag, affix = tok.start + tok.len, tok.tag, False
+                    continue
                 start, run_prev_tag = tok.start, prev_tag
             end = tok.start + tok.len
             n_tokens += 1
@@ -545,7 +602,8 @@ def _cooccurrence(rows: list[list[str]], kinds: list[str],
             if i >= len(kinds) or kinds[i] != "entity":
                 continue
             v = name_core(normalize_label(cell), i not in keep_paren)
-            if not v or is_value(v) or not (_MIN_NAME <= len(v) <= _MAX_NAME) or is_sentence_like(v):
+            if (not v or is_value(v) or not (_MIN_NAME <= len(v) <= _MAX_NAME) or not is_name_shape(v)
+                    or is_sentence_like(v)):
                 continue
             cls = heads[i].strip() if i < len(heads) else ""
             if is_value(cls) or not (0 < len(cls) <= _MAX_NAME):
@@ -631,6 +689,7 @@ def _row_key(r: list[str], id_cols: list[int], keep_paren: set | None = None) ->
 def _table_facts(rows: list[list[str]], kinds: list[str], heads: list[str],
                  caption: str) -> ChunkFacts:
     """Table with a header: one entity per row; (row -> column -> cell) is a property for value columns and a relation for entity columns."""
+    heads = [normalize_label(h) for h in heads]
     heads = [(h if looks_like_header(h) and _MIN_NAME <= len(h) <= _MAX_HEAD else "") for h in heads]
     ent_cols = [i for i, k in enumerate(kinds) if k == "entity" and i < len(heads)]
     prefix = ""
@@ -685,7 +744,7 @@ def _table_facts(rows: list[list[str]], kinds: list[str], heads: list[str],
         if len(label) > _MAX_ROW_LABEL:
             label = _row_key(r, id_cols[:1])
         if (not (_MIN_NAME <= len(label) <= _MAX_ROW_LABEL) or (not prefix and is_value(label))
-                or is_sentence_like(label)):
+                or not is_name_shape(label) or is_sentence_like(label)):
             continue
         ents.append((label, row_class))
         names = [label]
@@ -694,7 +753,7 @@ def _table_facts(rows: list[list[str]], kinds: list[str], heads: list[str],
             for i in id_cols:
                 v = (name_core(normalize_label(r[i]), i not in keep_paren)
                      if i < len(r) else "")
-                if v and v != label and not is_value(v) and _MIN_NAME <= len(v) <= _MAX_NAME:
+                if v and v != label and not is_value(v) and _MIN_NAME <= len(v) <= _MAX_NAME and is_name_shape(v):
                     ents.append((v, ""))
                     if heads[i]:
                         rels.append((label, heads[i], v))
@@ -710,8 +769,8 @@ def _table_facts(rows: list[list[str]], kinds: list[str], heads: list[str],
                 continue
             # Only cells that become entities are normalized to name form; values stay verbatim.
             v = name_core(normalize_label(cell), j not in keep_paren)
-            if not v or not (_MIN_NAME <= len(v) <= _MAX_NAME) or is_sentence_like(v):
-                props.append((label, heads[j], cell))   # long text / sentence cells become values
+            if not v or not (_MIN_NAME <= len(v) <= _MAX_NAME) or not is_name_shape(v) or is_sentence_like(v):
+                props.append((label, heads[j], cell))   # long text, sentence and fragment cells become values
                 continue
             ents.append((v, heads[j]))
             rels.append((label, heads[j], v))
@@ -723,6 +782,33 @@ def _table_facts(rows: list[list[str]], kinds: list[str], heads: list[str],
     return ChunkFacts(ents, pairs, rels, props, heads, pieces)
 
 
+def _record_text(text: str) -> str | None:
+    """If most lines are {"key": value} members (a JSON-like record dump), the text values
+    only; keys, brackets and non-text values (numbers, booleans, null) are not prose.
+    Otherwise ``None``."""
+    lines = [ln for ln in (text or "").split("\n") if ln.strip(" \t,{}[]")]
+    members = [_MEMBER.match(ln) for ln in lines]
+    n = sum(1 for m in members if m)
+    if n * 2 <= len(lines):
+        return None
+    out: list[str] = []
+    for line, m in zip(lines, members):
+        if not m:
+            out.append(line.strip().strip('",'))      # the rest of a value cut at a line boundary
+            continue
+        v = m.group(2).rstrip(" }]")
+        if not v.startswith('"'):
+            continue                                  # number, boolean, null, an opening bracket
+        try:
+            s = json.loads(v if len(v) > 1 and v.endswith('"') else v + '"')
+        except ValueError:
+            s = v.strip('"')
+        # A value with no letter (a date, a number) or of one character (Y/N) is not prose.
+        if isinstance(s, str) and len(s.strip()) >= _MIN_NAME and any(ch.isalpha() for ch in s):
+            out.append(s)
+    return "\n".join(out)
+
+
 def prose_only(text: str, header_patterns=()) -> str:
     """The prose part of a chunk, with tables removed.
 
@@ -730,11 +816,12 @@ def prose_only(text: str, header_patterns=()) -> str:
     not a sentence, so the noun after the anchor word is a shared column value,
     not a hypernym (measured on a real corpus: 80% of raw pairs came from tables
     and nearly all were wrong). Strips HTML tables, pipe grids and whitespace
-    row dumps, plus ingestion markers.
+    row dumps, plus ingestion markers. A record dump reads as its text values.
     """
     t = _MARKER.sub("", _META.sub("", strip_headers(text or "", header_patterns))).strip()
     if not t:
         return ""
+    t = _record_text(t) or t
     if "<table" in t:
         return _TABLE_BLOCK.sub(" ", t)
     if parse_pipe_table(t):
@@ -747,6 +834,9 @@ def extract_chunk(text: str, prev_heads: list[str] | None = None,
                   header_patterns=()) -> ChunkFacts:
     """One chunk -> :class:`ChunkFacts`. ``prev_heads``: column names of the previous chunk of the same document (a table split across chunks)."""
     t = _MARKER.sub("", _META.sub("", strip_headers(text, header_patterns))).strip()
+    rec = _record_text(t)
+    if rec is not None:
+        t = rec                      # a record dump: read the text of its values only
     if not t:
         return ChunkFacts([], [], [], [], [])
     is_html = "<table" in t
@@ -805,14 +895,8 @@ def extract_chunk(text: str, prev_heads: list[str] | None = None,
     return facts
 
 
-def extract_from_chunk(text: str, header_patterns=()) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
-    """One chunk -> ``([(entity, class)], [same-row entity pairs])``."""
-    f = extract_chunk(text, header_patterns=header_patterns)
-    return f.ents, f.pairs
-
-
 def build_facts(chunks: list[dict[str, Any]], *, min_freq: int = 1,
-                max_coverage: float = 0.30, denominator: int | None = None,
+                max_coverage: float = MAX_COVERAGE, denominator: int | None = None,
                 header_patterns=()) -> dict[str, Any]:
     """Chunks -> entities, classes, co-occurrence pairs and row facts.
 
@@ -866,8 +950,9 @@ def extract_as_dicts(
     documents: dict[str, list[dict[str, Any]]],
     *,
     min_freq: int = 1,
-    max_coverage: float = 0.30,
+    max_coverage: float = MAX_COVERAGE,
     corpus_chunks: int | None = None,
+    corpus_docs: int | None = None,
     header_patterns=(),
     common_word_rank: int = DEFAULT_COMMON_WORD_RANK,
     hearst: bool = True,
@@ -876,8 +961,11 @@ def extract_as_dicts(
 
     Same shape as the LLM extractor's result. ``corpus_chunks`` is the
     denominator of the discriminativeness test (the whole corpus when the
-    documents passed are only a part of it). ``hearst=False`` skips the
-    prose hierarchy pass.
+    documents passed are only a part of it); ``corpus_docs`` is the denominator
+    of the head-noun spread test (the corpus's document count; without it, the
+    documents of this call). ``hearst=False`` skips the prose hierarchy pass.
+    Table relations come out as ``relatedTo`` with the column name as their
+    ``label``: a column name is not a relation name.
     """
     from .taxonomy import hearst_hierarchy  # local import: taxonomy imports prose_only from here
 
@@ -947,7 +1035,7 @@ def extract_as_dicts(
     # that filters entities, applied to the head together with its members.
     # Spread is measured over documents: a corpus of many documents dilutes any name's
     # share of chunks, while "whether"-names still turn up in most documents.
-    _n_docs = len(documents or {})
+    _n_docs = int(corpus_docs or len(documents or {}))
     _n_chunks = max(1, int(res.get("n_chunks") or 1))
     _cov_on = _n_chunks >= _COVERAGE_MIN_CHUNKS
 
@@ -1018,8 +1106,8 @@ def extract_as_dicts(
     # Row facts, in the LLM extractor's dict shape.
     relations: list[dict] = []
     data_props: list[dict] = []
-    for (subj, pred, obj), cids in res.get("relations", []):
-        relations.append({"subject": subj, "predicate": pred, "object": obj,
+    for (subj, head, obj), cids in res.get("relations", []):
+        relations.append({"subject": subj, "predicate": RELATED_PREDICATE, "label": head, "object": obj,
                           "predicate_type": "ObjectProperty",
                           "source_chunks": sorted(c for c in cids if c)})
     props_seen: set = set()
@@ -1038,8 +1126,9 @@ def extract_deterministic(
     documents: dict[str, list[dict[str, Any]]],
     *,
     min_freq: int = 1,
-    max_coverage: float = 0.30,
+    max_coverage: float = MAX_COVERAGE,
     corpus_chunks: int | None = None,
+    corpus_docs: int | None = None,
     header_patterns=(),
     common_word_rank: int = DEFAULT_COMMON_WORD_RANK,
     hearst: bool = True,
@@ -1047,7 +1136,8 @@ def extract_deterministic(
     """Zero-LLM extraction into the build models. See :func:`extract_as_dicts`."""
     c, ents, rels, dvs = extract_as_dicts(
         documents, min_freq=min_freq, max_coverage=max_coverage, corpus_chunks=corpus_chunks,
-        header_patterns=header_patterns, common_word_rank=common_word_rank, hearst=hearst)
+        corpus_docs=corpus_docs, header_patterns=header_patterns, common_word_rank=common_word_rank,
+        hearst=hearst)
     concepts = Concepts(
         classes=[Class(name=x["name"], description=x.get("description", ""), parent=x.get("parent"))
                  for x in c["classes"]],
@@ -1060,7 +1150,7 @@ def extract_deterministic(
                           source_chunks=list(e.get("source_chunks") or []))
                  for doc_ents in ents.values() for e in doc_ents]
     relations = [Relation(subject=r["subject"], predicate=r["predicate"], object=r["object"],
-                          source_chunks=list(r.get("source_chunks") or []))
+                          label=r.get("label") or None, source_chunks=list(r.get("source_chunks") or []))
                  for r in rels]
     data_values = [DataValue(entity=d["entity"], property=d["property"], value=d["value"],
                              source_chunks=list(d.get("source_chunks") or []))

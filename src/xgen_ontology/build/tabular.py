@@ -12,46 +12,57 @@ Two stages, both domain-general:
 """
 from __future__ import annotations
 
+import csv
 import re
 from collections import Counter, defaultdict
-from html.parser import HTMLParser
 from typing import Any
 
+from ..korean import normalize_text
 from ..models import Class, Concepts, DataProperty, DataValue, Instance, ObjectProperty, Relation
 from ..text import safe_uri
-from .deterministic import is_value
+from .deterministic import _CELL_TAG, _META, _ROW, _SPAN, _clean, is_value, parse_pipe_table, strip_headers
 
-TABLE_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls"}
+TABLE_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xlsm", ".xls"}
 _REF_TABLE_MAX_ROWS = 200  # at/below this a table is treated as a dimension (instantiated)
 
 
 # ───────────────────────── schema inference ─────────────────────────
 
 
-def analyze_tables(documents: dict[str, list[dict]]) -> dict[str, Any]:
+def analyze_tables(documents: dict[str, list[dict]], *, header_patterns=()) -> dict[str, Any]:
     """Infer table schemas from chunked table documents.
 
     ``documents`` = ``{file_name: [{"chunk_id","chunk_text","chunk_index"}, ...]}``.
+    A file with several sheets (chunks led by ``[Sheet: name]``) is one table per
+    sheet, keyed by :func:`split_sheets`; the sheet name is the table name (the file
+    name is prefixed when two files share a sheet name). ``header_patterns`` strips
+    ingestion headers before the sheet marker is read.
     Returns ``{"tables": {...}, "fk_relations": [...], "is_table_collection": bool}``.
     """
     tables: dict[str, dict] = {}
     table_file_count = 0
 
-    for file_name, chunks in documents.items():
+    for file_name, file_chunks in documents.items():
         if _ext(file_name) not in TABLE_EXTENSIONS:
             continue
         table_file_count += 1
-        header, sample_rows, total_rows = _header_and_samples(chunks)
-        if not header:
-            continue
-        tables[file_name] = {
-            "table_name": _table_name(file_name),
-            "columns": header,
-            "column_types": _infer_column_types(header, sample_rows),
-            "pk_candidates": _pk_candidates(header, sample_rows),
-            "sample_values": _sample_values(header, sample_rows),
-            "row_count_estimate": total_rows,
-        }
+        for key, chunks in split_sheets(file_name, file_chunks, header_patterns).items():
+            header, sample_rows, total_rows = _header_and_samples(chunks)
+            if not header:
+                continue
+            stem = _table_name(file_name)
+            name = sheet_of(key) or stem
+            if any(t["table_name"] == name for t in tables.values()):
+                name = f"{stem}_{name}"   # "Sheet1" of another file must not become the same class
+            tables[key] = {
+                "table_name": name,
+                "file_name": file_name,
+                "columns": header,
+                "column_types": _infer_column_types(header, sample_rows),
+                "pk_candidates": _pk_candidates(header, sample_rows),
+                "sample_values": _sample_values(header, sample_rows),
+                "row_count_estimate": total_rows,
+            }
 
     return {
         "tables": tables,
@@ -63,17 +74,22 @@ def analyze_tables(documents: dict[str, list[dict]]) -> dict[str, Any]:
 def build_from_tables(
     schema: dict[str, Any],
     documents: dict[str, list[dict]],
+    *,
+    header_patterns=(),
 ) -> tuple[Concepts, list[Instance], list[Relation], list[DataValue]]:
     """Schema + rows -> ontology. LLM-free, deterministic."""
     tables = schema.get("tables", {})
     fk_relations = schema.get("fk_relations", [])
     if not tables:
         return Concepts(), [], [], []
+    # One table per sheet, keyed the way analyze_tables keyed them.
+    documents = {key: chunks for file_name, file_chunks in documents.items()
+                 for key, chunks in split_sheets(file_name, file_chunks, header_patterns).items()}
 
     table_class = {t.get("table_name", fn): _camel(t.get("table_name", fn)) for fn, t in tables.items()}
 
     classes = [
-        Class(name=table_class[t.get("table_name", fn)],
+        Class(name=table_class[t.get("table_name", fn)], source="table",
               description=f"{t.get('table_name', fn)} table ({t.get('row_count_estimate', 0)} rows)")
         for fn, t in tables.items()
     ]
@@ -303,79 +319,100 @@ def _instance_labels(rows: list[dict[str, str]], label_col: str, pk_col: str | N
     return out
 
 
-class _TableHTMLParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.rows: list[list[str]] = []
-        self._row: list[str] = []
-        self._cell = ""
-        self._in_cell = False
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "tr":
-            self._row = []
-        elif tag in ("td", "th"):
-            self._in_cell, self._cell = True, ""
-
-    def handle_endtag(self, tag):
-        if tag in ("td", "th"):
-            self._in_cell = False
-            self._row.append(self._cell.strip())
-        elif tag == "tr" and self._row:
-            self.rows.append(self._row)
-
-    def handle_data(self, data):
-        if self._in_cell:
-            self._cell += data
+_SHEET = re.compile(r"^\s*\[Sheet:\s*([^\]]+)\]", re.I)
+_SHEET_SEP = "#sheet="   # a '#' in the file name must not read as a sheet key
 
 
-def _parse_rows(text: str) -> list[list[str]]:
-    if "<table" in text.lower() or "<tr" in text.lower():
-        p = _TableHTMLParser()
-        try:
-            p.feed(text)
-            if p.rows:
-                return p.rows
-        except Exception:
-            pass
-    lines = text.splitlines()
-    pipe_rows = []
-    for line in lines:
-        line = line.strip()
-        if "|" in line and line.count("|") >= 2:
-            if re.match(r"^[\s|:-]+$", line):
-                continue
-            cells = [c.strip() for c in line.split("|")]
-            if cells and cells[0] == "":
-                cells = cells[1:]
-            if cells and cells[-1] == "":
-                cells = cells[:-1]
-            if cells:
-                pipe_rows.append(cells)
-    if pipe_rows:
-        return pipe_rows
-    csv_rows = []
-    for line in lines:
-        line = line.strip()
-        if line and "," in line:
-            cells = _csv_split(line)
-            if len(cells) >= 2:
-                csv_rows.append(cells)
-    return csv_rows
+def _html_rows(text: str) -> list[list[str]]:
+    """HTML table rows with spans expanded back to one value and empty cells, the way a
+    converter folds empty cells into the previous cell's span."""
+    out: list[list[str]] = []
+    carry: dict[int, int] = {}   # column -> rows still covered by a rowspan
+
+    def _fill(cells: list[str], col: int) -> int:
+        while col in carry:
+            cells.append("")
+            carry[col] -= 1
+            if carry[col] <= 0:
+                del carry[col]
+            col += 1
+        return col
+
+    for row in _ROW.findall(text):
+        cells: list[str] = []
+        col = 0
+        for m in _CELL_TAG.finditer(row):
+            col = _fill(cells, col)
+            rs = cs = 1
+            for kind, n in _SPAN.findall(m.group(1)):
+                if kind.lower() == "row":
+                    rs = max(1, int(n))
+                else:
+                    cs = max(1, int(n))
+            cells.append(_clean(m.group(2)))
+            cells.extend([""] * (cs - 1))
+            if rs > 1:
+                for k in range(cs):
+                    carry[col + k] = rs - 1
+            col += cs
+        _fill(cells, col)
+        if cells:
+            out.append(cells)
+    return out
 
 
-def _csv_split(line: str) -> list[str]:
-    cells, cur, q = [], "", False
-    for ch in line:
-        if ch == '"':
-            q = not q
-        elif ch == "," and not q:
-            cells.append(cur.strip().strip('"'))
-            cur = ""
-        else:
-            cur += ch
-    cells.append(cur.strip().strip('"'))
-    return cells
+def _delimited_rows(text: str) -> list[list[str]]:
+    lines = [line for line in text.splitlines() if line.strip()]
+    sep = "\t" if lines and "\t" in lines[0] else ","
+    return [[c.strip() for c in cells] for cells in csv.reader(lines, delimiter=sep)]
+
+
+def table_cell_rows(text: str) -> list[list[str]]:
+    """The cell rows of a table chunk (HTML, pipe grid, CSV or TSV), header row included."""
+    text = (text or "").lstrip("\ufeff")
+    if not text.strip():
+        return []
+    low = text.lower()
+    if "<table" in low or "<tr" in low:
+        rows = _html_rows(text)
+        if rows:
+            return rows
+    if text.count("|") >= 3:
+        return parse_pipe_table(text)
+    return _delimited_rows(text)
+
+
+def split_sheets(file_name: str, chunks: list[dict], header_patterns=()) -> dict[str, list[dict]]:
+    """A file with several sheets is one table per sheet: ``{key: chunks}``. One sheet (or
+    no sheet marker) keeps the file name as the key."""
+    by_sheet: dict[str, list[dict]] = {}
+    for chunk in chunks:
+        # the sheet marker comes first once ingestion headers and metadata are gone
+        m = _SHEET.match(_META.sub("", strip_headers(chunk.get("chunk_text", "") or "", header_patterns)))
+        by_sheet.setdefault(m.group(1).strip() if m else "", []).append(chunk)
+    if len(by_sheet) <= 1:
+        return {file_name: chunks}
+    return {f"{file_name}{_SHEET_SEP}{sheet}" if sheet else file_name: part for sheet, part in by_sheet.items()}
+
+
+def sheet_of(key: str) -> str:
+    """The sheet name in a :func:`split_sheets` key, or ``""``."""
+    return key.rsplit(_SHEET_SEP, 1)[1] if _SHEET_SEP in key else ""
+
+
+def unique_names(names: list[str]) -> list[str]:
+    """Number repeated names (_2, _3): two equal column names would collapse into one dict key."""
+    seen: dict[str, int] = {}
+    out = []
+    for n in names:
+        seen[n] = seen.get(n, 0) + 1
+        out.append(n if seen[n] == 1 else f"{n}_{seen[n]}")
+    return out
+
+
+def header_names(cells: list[str]) -> list[str]:
+    """A cell row as column names: normalized spelling, repeats numbered. Header rows are compared in this form."""
+    return unique_names([normalize_text(c) for c in cells])
 
 
 def _header_and_samples(chunks: list[dict]) -> tuple[list[str], list[list[str]], int]:
@@ -383,22 +420,25 @@ def _header_and_samples(chunks: list[dict]) -> tuple[list[str], list[list[str]],
         return [], [], 0
     all_rows: list[list[str]] = []
     for ch in sorted(chunks, key=lambda c: c.get("chunk_index", 0)):
-        all_rows.extend(_parse_rows(ch.get("chunk_text", "")))
+        all_rows.extend(table_cell_rows(ch.get("chunk_text", "")))
     if not all_rows:
         return [], [], 0
-    total = sum(max(0, len(_parse_rows(ch.get("chunk_text", ""))) - 1) for ch in chunks)
-    return all_rows[0], all_rows[1:], max(total, 1)
+    header = header_names(all_rows[0])
+    # a table split over chunks repeats its header in every chunk: those are not data
+    data_rows = [r for r in all_rows[1:] if header_names(r) != header]
+    return header, data_rows, len(data_rows)
 
 
 def _rows_from_chunks(chunks: list[dict], columns: list[str]) -> tuple[list[dict[str, str]], list[list[str]]]:
     """Cell rows as column dicts, each with the id of the chunk it came from."""
+    n = len(columns)
     rows: list[dict[str, str]] = []
     src: list[list[str]] = []
     for ch in chunks:
         cid = ch.get("chunk_id", "")
-        for r in _parse_rows(ch.get("chunk_text", "")):
-            if len(r) >= len(columns) and r[:len(columns)] != columns:
-                rows.append(dict(zip(columns, r[:len(columns)])))
+        for r in table_cell_rows(ch.get("chunk_text", "")):
+            if len(r) >= n and header_names(r[:n]) != columns:
+                rows.append(dict(zip(columns, r[:n])))
                 src.append([cid] if cid else [])
     return rows, src
 
@@ -527,7 +567,7 @@ def _fk_relations(tables: dict[str, dict]) -> list[dict[str, str]]:
             from_vals = set(tables[fn].get("sample_values", {}).get(col, []))
             if from_vals and pk_vals and len(from_vals & pk_vals) / max(len(from_vals), 1) < 0.3:
                 continue
-            key = (_table_name(fn), col, _table_name(pk_table), col)
+            key = (tables[fn]["table_name"], col, tables[pk_table]["table_name"], col)
             if key not in seen:
                 seen.add(key)
                 relations.append({"from_table": key[0], "from_column": key[1],
@@ -554,14 +594,22 @@ def _fk_relations(tables: dict[str, dict]) -> list[dict[str, str]]:
                         continue
                     na, nb = _norm_col(col_a), _norm_col(col_b)
                     name_match = na and nb and (na == nb or na in nb or nb in na)
+                    # Serial ids of two tables overlap by construction: numbers alone are no evidence.
+                    if not name_match and all(v.strip().lstrip("+-").replace(".", "", 1).isdigit() for v in overlap):
+                        continue
                     threshold = 0.3 if name_match else 0.8
                     if len(overlap) / len(vals_a) >= threshold or len(overlap) / len(vals_b) >= threshold:
                         pk_b = set(b.get("pk_candidates", []))
                         pk_a = set(a.get("pk_candidates", []))
-                        if col_b in pk_b or (len(vals_b) >= len(vals_a) and col_a not in pk_a):
-                            ft, fc, tt, tc = _table_name(fn_a), col_a, _table_name(fn_b), col_b
+                        # The direction comes from the definitions, not the sizes: the side whose
+                        # column is a key is referenced. Both keys (a 1:1 identity) or neither (a
+                        # shared code value) is not a foreign key.
+                        if col_b in pk_b and col_a not in pk_a:
+                            ft, fc, tt, tc = a["table_name"], col_a, b["table_name"], col_b
+                        elif col_a in pk_a and col_b not in pk_b:
+                            ft, fc, tt, tc = b["table_name"], col_b, a["table_name"], col_a
                         else:
-                            ft, fc, tt, tc = _table_name(fn_b), col_b, _table_name(fn_a), col_a
+                            continue
                         key = (ft, fc, tt, tc)
                         if key not in seen:
                             seen.add(key)

@@ -14,6 +14,7 @@ morphological analyzer exposing the same ``(form, tag, start)`` shape.
 """
 from __future__ import annotations
 
+import html
 import re
 import unicodedata
 
@@ -64,19 +65,98 @@ _LEAD = re.compile(
     # below so "(주)마장" (a company-name abbreviation) is left untouched.
     r"|\(\s*\d{1,3}\s*\)\s*(?=\S)"
     r"|[①-⑳]\s*"
-    r"|[가-하][.)]\s+(?=[가-힣A-Za-z(])"
+    r"|[가-하][.)]\s+(?=\S)"
     r"|\([가-하]\)\s+"
     r"|[□■○●◦▣▶※•․ᄋㅇ*†]\s*)+"
 )
 # Trailing markers: footnote-style (1) / circled digits / asterisks and daggers.
 _TAIL = re.compile(r"(?:\s*\(\s*(?:\d{1,2}|[①-⑳])\s*\)|\s*[①-⑳]|[*※†]+)+$")
 _WRAP = "'‘’\"“” "
+# Sentence-final punctuation. A name or a table cell does not end like a sentence.
+SENT_END = re.compile(r"[.!?。！？]\Z")
+# Escapes left in text (a literal backslash-n, an escaped quote, a \uXXXX code).
+# A backslash never means anything inside a name.
+_ESCAPE = re.compile(r"\\(u[0-9a-fA-F]{4}|[nrt]|.)")
+
+
+def _unescape(m: "re.Match[str]") -> str:
+    e = m.group(1)
+    if e[0] == "u" and len(e) == 5:
+        return chr(int(e[1:], 16))
+    return " " if e in ("n", "r", "t") else e
+
+
+def _opens(ch: str) -> bool:
+    """An opening bracket or quote (Unicode categories Ps / Pi, or a straight double quote)."""
+    return ch == '"' or unicodedata.category(ch) in ("Ps", "Pi")
+
+
+def _closes(ch: str) -> bool:
+    return ch == '"' or unicodedata.category(ch) in ("Pe", "Pf")
+
+
+def _balanced(t: str) -> bool:
+    """Brackets pair up in order (the open count never goes negative and ends at zero), and so do quotes."""
+    depth = 0
+    for ch in t:
+        cat = unicodedata.category(ch)
+        depth += (cat == "Ps") - (cat == "Pe")
+        if depth < 0:
+            return False
+    cats = [unicodedata.category(ch) for ch in t]
+    return depth == 0 and cats.count("Pi") == cats.count("Pf") and t.count('"') % 2 == 0
+
+
+def strip_closers(s: str) -> str:
+    """Drop trailing commas, semicolons, spaces and closing brackets or quotes, so a full stop before them shows."""
+    t = (s or "").rstrip(" ,;")
+    while t and _closes(t[-1]):
+        t = t[:-1].rstrip(" ,;")
+    return t
+
+
+def _trailing_mark(t: str) -> bool:
+    """Does ``t`` end in a mark that is not part of a name: a phrase separator (, ; :) or a symbol
+    (a table border, an arrow, an operator, a check box)? A unit such as % (punctuation, not a
+    symbol) stays. Known limit: a grade suffix glued to a letter ("AA+") goes too, since + shares
+    its Unicode category with × = → and shape alone cannot tell a suffix from a connector."""
+    ch = t[-1]
+    return ch in ",;:" or unicodedata.category(ch)[0] == "S"
+
+
+def is_marker_char(ch: str) -> bool:
+    """A bullet: punctuation or a symbol that is not a letter, digit, bracket or quote."""
+    return (bool(ch) and not ch.isalnum() and not _opens(ch) and not _closes(ch)
+            and unicodedata.category(ch)[0] in "PS")
+
+
+def starts_with_list_marker(s: str) -> bool:
+    """Is this line a list item (numbered, lettered, circled or bulleted)?"""
+    t = (s or "").lstrip()
+    return bool(t) and (bool(_LEAD.match(t)) or is_marker_char(t[0]))
+
+
+def _decode(s: str) -> str:
+    """Resolve HTML entities and escapes. Runs before bullet detection, or the & of an entity reads as a bullet."""
+    return _ESCAPE.sub(_unescape, html.unescape(s or ""))
 
 
 def strip_list_markers(s: str) -> str:
-    """Drop a leading/trailing outline marker (``"01. Foo"`` -> ``"Foo"``)."""
-    t = " ".join((s or "").split())
+    """Drop a leading/trailing outline marker (``"01. Foo"`` -> ``"Foo"``).
+
+    Bullets the marker pattern does not list and a trailing separator or symbol are
+    not part of the name either. A sentence-final mark is left for
+    :func:`is_name_shape` to reject. A bracket or quote pair wrapping the whole name
+    is removed when the inside is balanced on its own.
+    """
+    t = " ".join(_decode(s).split())
     core = _TAIL.sub("", _LEAD.sub("", t)).strip()
+    while core and is_marker_char(core[0]):
+        core = core[1:].lstrip()
+    while core and _trailing_mark(core):
+        core = core[:-1].rstrip()
+    while len(core) > 2 and _opens(core[0]) and _closes(core[-1]) and _balanced(core[1:-1]):
+        core = core[1:-1].strip()
     return core if core else t
 
 
@@ -89,12 +169,13 @@ def _despace_letterspaced(s: str) -> str:
 
 
 def normalize_text(s: str) -> str:
-    """Normalize form only: NFKC, single spaces, strip wrapping quotes, undo letter-spacing.
+    """Normalize form only: resolve entities and escapes, NFKC, single spaces, strip wrapping
+    quotes, undo letter-spacing.
 
     List markers are left in place -- callers that need to detect a table header
     (which cares whether a marker was present) run before :func:`normalize_label`.
     """
-    t = unicodedata.normalize("NFKC", s or "")
+    t = unicodedata.normalize("NFKC", _decode(s))
     return _despace_letterspaced(" ".join(t.split()).strip(_WRAP))
 
 
@@ -128,9 +209,26 @@ def is_sentence_like(name: str) -> bool:
     return any(tag in _SENTENCE_ENDINGS for tag in tags) or (bool(tags) and tags[-1] in _VERBAL_TAIL_TAGS)
 
 
+def is_name_shape(s: str) -> bool:
+    """Does this have the shape of a name?
+
+    It starts with a letter, a digit, an opening bracket or a quote; its brackets and
+    quotes pair up; it does not end in a symbol, separator or sentence punctuation; it
+    holds no line break or backslash. Decided by Unicode categories, with no word list.
+    """
+    t = (s or "").strip()
+    if not t or "\n" in t or "\\" in t:
+        return False
+    if not (t[0].isalnum() or t[0] == '"' or _opens(t[0])):
+        return False
+    if _trailing_mark(t) or SENT_END.search(t):
+        return False
+    return _balanced(t)
+
+
 def clean_name(name: str) -> str | None:
-    """The normalized name, or ``None`` if it's a sentence fragment rather than a name."""
+    """The normalized name, or ``None`` if it's a sentence fragment or not shaped like a name."""
     t = normalize_label(name)
-    if not t or is_sentence_like(t):
+    if not t or is_sentence_like(t) or not is_name_shape(t):
         return None
     return t

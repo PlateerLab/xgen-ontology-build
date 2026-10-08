@@ -44,12 +44,14 @@ def test_cluster_by_cosine_union_find():
     assert "color" not in rename
 
 
-def test_rule_dedup_object_properties_by_domain_range():
+def test_dedup_leaves_relation_names_to_the_vocabulary():
+    # Relation names are English identifiers held to relation formation's vocabulary;
+    # the synonym pass folds classes only (folding relations by domain/range merged
+    # different relations and turned English names back into document words).
     concepts = Concepts(object_properties=[
         ObjectProperty("hasColor", "Product", "Color"),
         ObjectProperty("color", "Product", "Color"),
     ])
     d = Deduplicator()  # no LLM/embedder -> rule passes only
-    merged = d.deduplicate(concepts, [], [Relation("p", "hasColor", "c")], [])
-    assert merged >= 1
-    assert len({p.name for p in concepts.object_properties}) == 1
+    d.deduplicate(concepts, [], [Relation("p", "hasColor", "c")], [])
+    assert {p.name for p in concepts.object_properties} == {"hasColor", "color"}

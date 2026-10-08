@@ -7,14 +7,18 @@ database plumbing:
 2. extraction by ``mode``:
    * ``"basic"`` (default): :mod:`.deterministic`, **zero LLM calls** -- entities,
      classes and row facts from document structure, Hearst hierarchy from prose
-   * ``"enrich"``: basic, then an LLM pass that adds relations between the known
-     entities, then LLM synonym folding of the schema
+   * ``"enrich"``: basic, then relation formation (:mod:`.relation_formation`): the
+     documents are cut into units of evidence and a model names the relation between
+     two nodes a unit mentions, held to a vocabulary of relation names; then LLM synonym
+     folding of the classes. The production system calls this build "full"
    * ``"llm"``: full LLM extraction of schema and instances (the pre-0.6 path)
-3. rule post-build: instance-key merge -> predicate merge (stem + co-extension)
-   -> name-fragment folding -> common-word pruning -> hierarchy from name
-   structure (classes *and* instances) -> vector dedup (if an embedder is given)
-   -> self-typed repair -> hierarchy clean -> property inheritance
-   -> graph normalization (the store-loading rules)
+3. rule post-build: instance-key merge -> name-fragment folding -> common-word
+   pruning -> hierarchy from name structure (classes *and* instances; a head too
+   common to classify is judged over the whole collection) -> class synonyms (LLM)
+   and vector dedup of classes (if an embedder is given) -> self-typed repair ->
+   hierarchy clean -> property inheritance -> graph normalization (the
+   store-loading rules: relation names as English identifiers with the document's
+   name as the label, weights and sources merged)
 4. a quality review recorded on the report
 
 Pass ``progress=callable`` to be told each stage (``progress(stage, detail)``); the
@@ -32,16 +36,23 @@ all optional.
 """
 from __future__ import annotations
 
-from ..models import BuildReport, Chunk, Concepts, DataValue, Instance, Relation
+from ..models import BuildReport, Chunk, Concepts, DataValue, Instance, ObjectProperty, Relation
 from .chunk import chunk_document
 from .dedup import Deduplicator
-from .deterministic import DEFAULT_COMMON_WORD_RANK, extract_deterministic
+from .deterministic import DEFAULT_COMMON_WORD_RANK, MAX_COVERAGE, extract_deterministic
 from .dictionary import TermDictionary
 from .extract import DocumentExtractor
-from .finalize import normalize_graph
-from .govern import merge_predicates
+from .finalize import GRAPH_VOCABULARY, LEGACY_RELATED_PREDICATE, canon_predicate, normalize_graph
 from .hierarchy import clean_hierarchy, fix_self_typed_instances, materialize_property_inheritance
 from .quality import review_quality
+from .relation_formation import (
+    EN_RELATION_PROMPTS,
+    RelationFormer,
+    RelationPrompts,
+    canonicalize_predicates,
+    labels_by_chunk,
+    vocabulary_of,
+)
 from .resolve import resolve_entities
 from .retract import retract_chunks
 from .tabular import TABLE_EXTENSIONS, analyze_tables, build_from_tables
@@ -59,11 +70,13 @@ class OntologyBuilder:
     def __init__(self, llm=None, *, mode: str = "basic", morphology=None, embedder=None,
                  domain: str = "", dedup: bool = True, hierarchy: bool = True,
                  resolve: bool = False, chunk: bool = True, chunk_size: int = 1200,
-                 chunk_overlap: int = 150, header_patterns=(), max_coverage: float = 0.30,
+                 chunk_overlap: int = 150, header_patterns=(), max_coverage: float = MAX_COVERAGE,
                  min_freq: int = 1, common_word_rank: int = DEFAULT_COMMON_WORD_RANK,
                  related_predicate: str | None = DEFAULT_RELATED_PREDICATE,
                  unit_scales: dict | None = None, dictionary: TermDictionary | None = None,
-                 progress=None):
+                 progress=None, relation_prompts: RelationPrompts = EN_RELATION_PROMPTS,
+                 char_budget: int = 10000, max_output_tokens: int = 0, llm_timeout: float | None = None,
+                 max_workers: int = 1, retry_backoff: float = 5.0, should_stop=None):
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
         self.llm = llm
@@ -85,6 +98,23 @@ class OntologyBuilder:
         self.unit_scales = unit_scales
         self.dictionary = dictionary
         self.progress = progress
+        # relation formation: the prompts, one call's input budget, the answer cap (0: unknown),
+        # a call's timeout, parallel calls, the pause before asking an empty answer again, and a
+        # check asked before every call (once true, nothing more is sent)
+        self.relation_prompts = relation_prompts
+        self.char_budget = char_budget
+        self.max_output_tokens = max_output_tokens
+        self.llm_timeout = llm_timeout
+        self.max_workers = max_workers
+        self.retry_backoff = retry_backoff
+        self.should_stop = should_stop
+
+    def _relation_former(self) -> RelationFormer:
+        return RelationFormer(
+            self.llm, prompts=self.relation_prompts, char_budget=self.char_budget,
+            max_output_tokens=self.max_output_tokens, timeout=self.llm_timeout, max_workers=self.max_workers,
+            retry_backoff=self.retry_backoff, should_stop=self.should_stop, header_patterns=self.header_patterns,
+            progress=lambda done, total: self._tick("enrich", done=done, total=total))
 
     def _tick(self, stage: str, **detail) -> None:
         """Report a pipeline stage to ``progress(stage, detail)``; an application drives its own job state from it."""
@@ -148,7 +178,8 @@ class OntologyBuilder:
         stats = {"chunks": 0}
         if ids:
             self._tick("retract", chunks=len(ids))
-            structural = (self.related_predicate, "sameAs") if self.related_predicate else ("sameAs",)
+            # name-structure links are not chunk evidence; the former spelling counts too
+            structural = tuple(x for x in (self.related_predicate, LEGACY_RELATED_PREDICATE, "sameAs") if x)
             stats = retract_chunks(onto.concepts, onto.instances, onto.relations, onto.data_values, ids,
                                    structural_predicates=structural)
             onto.chunks = [c for c in onto.chunks if c.id not in ids]
@@ -174,6 +205,13 @@ class OntologyBuilder:
         table_docs = {n: c for n, c in new_docs.items() if _ext(n) in TABLE_EXTENSIONS}
         text_docs = {n: c for n, c in new_docs.items() if _ext(n) not in TABLE_EXTENSIONS}
         before = {c.name for c in concepts.classes} | {i.name for i in instances}
+        # Which document each chunk came from (this call's documents plus what earlier builds
+        # recorded on the chunks): the spread of a head noun is measured over documents.
+        doc_of = {c.id: c.meta["doc"] for c in onto.chunks if c.meta.get("doc")}
+        for name, chs in documents.items():
+            for ch in chs:
+                doc_of[ch["chunk_id"]] = name
+        corpus_docs = len(set(doc_of.values()))
         if incremental and not new_docs and mode != "enrich":
             report.notes.append("no new chunks: nothing to extract")
 
@@ -182,8 +220,8 @@ class OntologyBuilder:
         protected: set[str] = set()   # table-built names: deterministic identities, never renamed away
         if table_docs:
             self._tick("tables", documents=len(table_docs))
-            schema = analyze_tables(table_docs)
-            c, i, r, dv = build_from_tables(schema, table_docs)
+            schema = analyze_tables(table_docs, header_patterns=self.header_patterns)
+            c, i, r, dv = build_from_tables(schema, table_docs, header_patterns=self.header_patterns)
             _merge(concepts, c)
             instances += i
             relations += r
@@ -194,7 +232,7 @@ class OntologyBuilder:
             self._tick("extract", documents=len(text_docs), chunks=sum(len(v) for v in text_docs.values()))
             c, i, r, dv = extract_deterministic(
                 text_docs, min_freq=self.min_freq, max_coverage=self.max_coverage,
-                corpus_chunks=corpus_total, header_patterns=self.header_patterns,
+                corpus_chunks=corpus_total, corpus_docs=corpus_docs, header_patterns=self.header_patterns,
                 common_word_rank=self.common_word_rank, hearst=self.hierarchy)
             _merge(concepts, c)
             instances += i
@@ -208,16 +246,23 @@ class OntologyBuilder:
             todo = {n: chs for n, chs in todo.items() if chs}
             if todo:
                 self._tick("enrich", chunks=sum(len(v) for v in todo.values()))
-                extractor = DocumentExtractor(self.llm, domain=self.domain,
-                                              header_patterns=self.header_patterns)
-                known_preds = list(dict.fromkeys(
-                    [r.predicate for r in relations if r.predicate]
-                    + [op.name for op in concepts.object_properties if op.name]))
-                relations += extractor.extract_relations(
-                    todo, known_entities=list(dict.fromkeys(i.name for i in instances if i.name)),
-                    known_predicates=known_preds)
-                report.llm_calls += extractor.llm_calls
-                onto.enriched_chunks = sorted(done | {ch["chunk_id"] for chs in todo.values() for ch in chs})
+                former = self._relation_former()
+                # The vocabulary is the declared relation names with their definitions; without
+                # one, the names already in use (without definitions); without those, the
+                # former defines one from the documents.
+                vocab = vocabulary_of(concepts) or [{"name": p, "definition": ""}
+                                                    for p in _known_predicates(relations)]
+                found, rstats = former.extract(todo, labels_by_chunk(concepts, instances),
+                                               vocabulary=vocab, domain=self.domain)
+                relations += found
+                _declare_relations(concepts, rstats.get("new_vocabulary") or [], found)
+                report.llm_calls += former.llm_calls
+                report.relation_stats = {k: v for k, v in rstats.items() if k != "new_vocabulary"}
+                report.relation_stats["new_vocabulary"] = len(rstats.get("new_vocabulary") or [])
+                report.relation_stats["lost_chunks"] = len(former.lost_chunk_ids)
+                # a chunk no answer came back for is asked again next time
+                asked = {ch["chunk_id"] for chs in todo.values() for ch in chs} - former.lost_chunk_ids
+                onto.enriched_chunks = sorted(done | asked)
         if text_docs and mode == "llm":
             self._tick("llm", chunks=sum(len(v) for v in text_docs.values()))
             extractor = DocumentExtractor(self.llm, domain=self.domain,
@@ -244,7 +289,6 @@ class OntologyBuilder:
             if rename:
                 Deduplicator._apply_instance(rename, instances, relations, data_values)
                 report.renamed += len(rename)
-            report.predicates_merged += merge_predicates(relations, deduper._norm_key)["merged_predicates"]
             report.folded += _apply_fold(concepts, instances, data_values, relations)
             report.pruned += _apply_prune(instances, relations, data_values, self.common_word_rank)
 
@@ -255,35 +299,28 @@ class OntologyBuilder:
             new_names = None
             if incremental:
                 new_names = ({c.name for c in concepts.classes} | {i.name for i in instances}) - before
-            # Which document each chunk came from, for spread over documents (this call's
-            # documents plus what earlier builds recorded on the chunks).
-            doc_of = {c.id: c.meta["doc"] for c in onto.chunks if c.meta.get("doc")}
-            for name, chs in documents.items():
-                for ch in chs:
-                    doc_of[ch["chunk_id"]] = name
             induced = induce_hierarchy(concepts, prose_texts, instances, relations,
                                        related_predicate=self.related_predicate,
                                        header_patterns=self.header_patterns, new_names=new_names,
-                                       corpus_chunks=corpus_total, doc_of=doc_of,
-                                       corpus_docs=len(set(doc_of.values())))
+                                       corpus_chunks=corpus_total, max_coverage=self.max_coverage,
+                                       doc_of=doc_of, corpus_docs=corpus_docs, protected=protected)
             edges = induced["hearst_edges_added"] + induced["compound_edges_added"]
-            if edges or induced["typed"] or induced["promoted"]:
+            if edges or induced["typed"] or induced["promoted"] or induced["retyped"]:
                 report.notes.append(
                     f"name structure: {edges} hierarchy edge(s), {induced['typed']} instance typing(s), "
                     f"{induced['promoted']} head(s) promoted to class, "
-                    f"{induced['hearst_classes_added']} class(es) from Hearst patterns")
+                    f"{induced['hearst_classes_added']} class(es) from Hearst patterns, "
+                    f"{induced['retyped']} typing(s) under too common a head made neighbour links")
             report.renamed += induced["renamed"]
 
         if self.dedup:
             rename = deduper.compute_rename_map(concepts) if mode == "enrich" else {}
             report.llm_calls += deduper.llm_calls
             vmap = deduper._vector_dedup([c.name for c in concepts.classes if c.name])
-            vmap.update(deduper._vector_dedup([p.name for p in concepts.object_properties if p.name]))
             rename = {**vmap, **rename}          # the LLM map wins on conflict
             rename = {o: n for o, n in rename.items() if o not in protected and o != n}
             if rename:
                 Deduplicator._apply_class(rename, concepts, instances)
-                Deduplicator._apply_property(rename, concepts, relations, data_values)
                 Deduplicator._apply_instance(rename, instances, relations, data_values)
                 report.renamed += len(rename)
 
@@ -291,9 +328,19 @@ class OntologyBuilder:
         fix_self_typed_instances(instances, concepts)
         clean_hierarchy(concepts)
         materialize_property_inheritance(concepts)
-        report.normalized = normalize_graph(
-            concepts, instances, relations, data_values,
-            structural_predicates=(self.related_predicate,) if self.related_predicate else ())
+        structural = (self.related_predicate,) if self.related_predicate else ()
+        report.normalized = normalize_graph(concepts, instances, relations, data_values,
+                                            structural_predicates=structural)
+        if mode == "enrich" and relations:
+            # Hold the relation names to the vocabulary (the production end-of-build step), then
+            # merge the triples that renaming made equal.
+            canon_former = self._relation_former()
+            canon = canonicalize_predicates(concepts, relations, canon_former)
+            report.llm_calls += canon_former.llm_calls
+            if canon:
+                report.relation_stats["canonicalized"] = canon
+                if canon.get("renamed"):
+                    normalize_graph(concepts, instances, relations, data_values, structural_predicates=structural)
         clean_hierarchy(concepts)
 
         onto.chunks = _extend_chunks(onto.chunks, documents, instances)
@@ -310,6 +357,32 @@ class OntologyBuilder:
         self._tick("done", classes=report.classes, instances=report.instances, relations=report.relations,
                    quality=report.quality.get("score"))
         return onto
+
+
+def _known_predicates(relations: list[Relation], limit: int = 120) -> list[str]:
+    """The relation names in use, most used first, without the graph's own vocabulary."""
+    counts: dict[str, int] = {}
+    for r in relations:
+        if r.predicate and r.predicate not in GRAPH_VOCABULARY and r.predicate_type != "DatatypeProperty":
+            counts[r.predicate] = counts.get(r.predicate, 0) + 1
+    return [p for p, _n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))][:limit]
+
+
+def _declare_relations(concepts: Concepts, vocabulary: list[dict], relations: list[Relation]) -> None:
+    """Declare relation names as object properties: the vocabulary defined on the way, with its
+    definitions, then every other name the model used. A declared name stays a relation when
+    the store loads it (an undeclared one with a value-shaped object would become an attribute)."""
+    known = {op.name for op in concepts.object_properties if op.name}
+    for v in vocabulary:
+        name = v.get("name")
+        if name and name not in known:
+            concepts.object_properties.append(ObjectProperty(name=name, description=v.get("definition") or ""))
+            known.add(name)
+    for r in relations:
+        name = canon_predicate(r.predicate)[0]
+        if name and name not in known and name not in GRAPH_VOCABULARY:
+            concepts.object_properties.append(ObjectProperty(name=name))
+            known.add(name)
 
 
 def unbuilt_chunks(ontology, documents: dict[str, list[dict]]) -> dict[str, list[dict]]:

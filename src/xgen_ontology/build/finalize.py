@@ -5,17 +5,18 @@ extracted item *is*: a class must look like a class name, a relation whose name 
 graph vocabulary (``type``, ``instanceOf``, ``subClassOf``, ``sameAs``) is a typing
 statement rather than a relation, a relation whose object is a value is an
 attribute, a subject that is a value is nothing at all, and anything referenced
-must exist (no dangling endpoints). :func:`normalize_graph` applies the same rules
-to the build models so that what a caller emits or searches is what the production
-graph would hold.
+must exist (no dangling endpoints). A relation's name is an English identifier;
+how the document itself names it is kept as its label. :func:`normalize_graph`
+applies the same rules to the build models so that what a caller emits or searches
+is what the production graph would hold.
 """
 from __future__ import annotations
 
 import re
 
-from ..korean import normalize_label
+from ..korean import is_sentence_like, normalize_label
 from ..models import Class, Concepts, DataValue, Instance, Relation
-from .deterministic import is_class_name
+from .deterministic import _MAX_ROW_LABEL, RELATED_PREDICATE, is_class_name
 
 # Relation names the graph uses as structure. A relation carrying one is a typing statement.
 RESERVED_PREDICATES = {
@@ -25,6 +26,41 @@ RESERVED_PREDICATES = {
     "sameAs": "sameAs", "same_as": "sameAs",
 }
 _DATATYPES = {"string", "integer", "decimal", "date", "boolean", "number"}
+# The neighbour link's former name ("related" in Korean), used by this library before 0.13 and by
+# older product builds. Graphs built then still carry it.
+LEGACY_RELATED_PREDICATE = "관련"
+# The graph's own vocabulary: structure, not a domain relation.
+GRAPH_VOCABULARY = frozenset({RELATED_PREDICATE, LEGACY_RELATED_PREDICATE, "sameAs", "instanceOf", "subClassOf"})
+# Names a relation may not be called (lower case): the graph's vocabulary and the aliases the
+# store turns into it (isA -> instanceOf). Relation formation neither proposes nor accepts them.
+RESERVED_PREDICATE_NAMES = frozenset(n.lower() for n in GRAPH_VOCABULARY | set(RESERVED_PREDICATES))
+_ASCII_PRED = re.compile(r"^[A-Za-z][A-Za-z0-9 _\-]*$")
+
+
+def canon_predicate(name) -> tuple[str, str | None]:
+    """A relation name -> ``(camelCase English predicate, label)``.
+
+    An English name becomes a camelCase identifier ("reports to", "REPORTS_TO" ->
+    ``reportsTo``). Any other name is not an identifier: the relation stays
+    :data:`RELATED_PREDICATE` and the original name is returned as its label.
+    """
+    text = ("" if name is None else str(name)).strip()
+    if not text:
+        return RELATED_PREDICATE, None
+    if not _ASCII_PRED.match(text):
+        return RELATED_PREDICATE, text
+    parts = [p for p in re.split(r"[\s_\-]+", text) if p]
+    head = parts[0].lower() if parts[0].isupper() else parts[0][0].lower() + parts[0][1:]
+    tail = "".join(p.lower().capitalize() if p.isupper() else p[0].upper() + p[1:] for p in parts[1:])
+    return head + tail, None
+
+
+def is_entity_shape(name) -> bool:
+    """Can a relation endpoint that names nothing yet become an individual? Not a value, not a
+    sentence, not empty, not longer than a row label."""
+    n = "" if name is None else str(name)
+    return (bool(n) and len(n) <= _MAX_ROW_LABEL and any(ch.isalpha() for ch in n)
+            and not is_value_like(n) and not is_sentence_like(n))
 
 
 # A value even with a unit, currency sign or bracket attached.
@@ -59,13 +95,22 @@ def normalize_graph(concepts: Concepts, instances: list[Instance], relations: li
     * a relation whose predicate is a declared datatype property, or whose object is
       a value, becomes a data value; a relation or data value whose subject is a
       value is dropped
-    * a name that occurs only as a relation endpoint or an attribute's subject becomes an
-      individual, even when a class of that name exists (OWL punning, as the store does);
-      ``structural_predicates`` (e.g. the "related" neighbour link) do not spawn individuals
+    * a relation endpoint is an individual that exists, else a declared class, else a
+      new individual when the name has an entity's shape (:func:`is_entity_shape`);
+      otherwise the relation (or data value) is dropped. ``structural_predicates`` (the
+      neighbour link) do not spawn individuals
+    * a relation's name becomes an English camelCase predicate; any other name becomes
+      :data:`RELATED_PREDICATE` with the original kept as the relation's ``label``
+      (:func:`canon_predicate`)
+    * one record per (subject, predicate, object): source chunks are united, the first
+      label stays, and the weight is the evidence: how many distinct chunks state the
+      relation (a relation with no source chunk keeps the sum of its records' weights)
+    * a pair linked by a named relation drops its unnamed ``relatedTo`` link, both ways;
+      the chunks it was stated in stay linked to its two ends (they appear there)
     * names are normalized to one spelling and duplicate records merged
     """
     stats = {"typed": 0, "subclassed": 0, "folded": 0, "to_data_value": 0, "dropped": 0,
-             "classes_dropped": 0, "classes_declared": 0}
+             "classes_dropped": 0, "classes_declared": 0, "relabeled": 0, "superseded": 0}
 
     # ── names to one spelling ──
     def nm(s) -> str:
@@ -204,10 +249,7 @@ def normalize_graph(concepts: Concepts, instances: list[Instance], relations: li
             stats["to_data_value"] += 1
             continue
         kept_r.append(r)
-    seen_r: set[tuple[str, str, str]] = set()
-    relations[:] = [r for r in kept_r
-                    if (r.subject, r.predicate, r.object) not in seen_r
-                    and not seen_r.add((r.subject, r.predicate, r.object))]
+    relations[:] = kept_r
 
     # ── instances: class-shaped types only; typings from relations; sameAs folds ──
     for i in instances:
@@ -254,15 +296,84 @@ def normalize_graph(concepts: Concepts, instances: list[Instance], relations: li
         kept_dv.append(d)
     data_values[:] = kept_dv
 
-    # ── names that exist only as a relation endpoint or an attribute's subject become instances ──
+    # ── endpoints: an individual that exists, else a declared class, else a new individual
+    #    with an entity's shape; anything else cannot be an endpoint ──
     known = {i.name for i in instances}
     structural = set(structural_predicates or ())
+
+    def endpoint_ok(name: str, spawn: bool) -> bool:
+        if name in known or name in declared:
+            return True
+        return not spawn or is_entity_shape(name)
+
+    kept_r = []
+    for r in relations:
+        spawn = r.predicate not in structural
+        if endpoint_ok(r.subject, spawn) and endpoint_ok(r.object, spawn):
+            kept_r.append(r)
+        else:
+            stats["dropped"] += 1
+    relations[:] = kept_r
+    kept_dv = []
+    for d in data_values:
+        if endpoint_ok(d.entity, True):
+            kept_dv.append(d)
+        else:
+            stats["dropped"] += 1
+    data_values[:] = kept_dv
+
+    # ── relation names: English identifiers, the document's own name as the label ──
+    for r in relations:
+        if r.predicate in structural:
+            continue
+        pred, label = canon_predicate(r.predicate)
+        if pred != r.predicate:
+            stats["relabeled"] += 1
+        r.predicate = pred
+        r.label = r.label or label
+
+    # ── one record per (subject, predicate, object): sources unite; the weight is the evidence ──
+    merged_r: dict[tuple[str, str, str], Relation] = {}
+    for r in relations:
+        key = (r.subject, r.predicate, r.object)
+        have = merged_r.get(key)
+        if have is None:
+            merged_r[key] = r
+            continue
+        have.weight = float(have.weight or 1.0) + float(r.weight or 1.0)
+        have.label = have.label or r.label
+        for cid in r.source_chunks:
+            if cid not in have.source_chunks:
+                have.source_chunks.append(cid)
+    for r in merged_r.values():
+        stated = {c for c in r.source_chunks if c}
+        if stated:
+            r.weight = float(len(stated))
+    # ── a named relation supersedes the unnamed link between the same two names ──
+    named = {frozenset((r.subject, r.object)) for r in merged_r.values()
+             if r.predicate not in GRAPH_VOCABULARY}
+    first_inst: dict[str, Instance] = {}
+    for i in instances:
+        first_inst.setdefault(i.name, i)
+    out_r = []
+    for r in merged_r.values():
+        if r.predicate == RELATED_PREDICATE and frozenset((r.subject, r.object)) in named:
+            stats["superseded"] += 1
+            for end in (r.subject, r.object):        # the ends still appear in those chunks
+                node = first_inst.get(end) or declared.get(end)
+                if node is not None:
+                    node.source_chunks.extend(c for c in r.source_chunks if c and c not in node.source_chunks)
+            continue
+        out_r.append(r)
+    relations[:] = out_r
+
+    # ── names that exist only as a relation endpoint or an attribute's subject become instances ──
     chunks_of: dict[str, list[str]] = {}
     ends = [(r.subject, r.source_chunks) for r in relations if r.predicate not in structural]
     ends += [(r.object, r.source_chunks) for r in relations if r.predicate not in structural]
     ends += [(d.entity, d.source_chunks) for d in data_values]
     for end, cids in ends:
-        if end and end not in known:
+        if end and end not in known and end not in declared:
             chunks_of.setdefault(end, [])
             for cid in cids:
                 if cid not in chunks_of[end]:

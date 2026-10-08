@@ -1,5 +1,6 @@
 """Rule post-build (name hygiene, hierarchy from names, predicate governance, typing repairs) and the pipeline modes."""
 import json
+import re
 
 import pytest
 
@@ -174,13 +175,46 @@ _TABLE = """예산 배정표
 </table>"""
 
 
+_UNIT_ENTITY = re.compile(r"(\d+)=(.+?)(?= \d+=|$)")
+
+
+def relation_model(pairs, *, definitions=None, log=None):
+    """A fake model for relation formation, shaped by the real prompts: a vocabulary request gets
+    ``definitions``; a classification request names ``pairs`` ({(subject, object): predicate})
+    by unit and mention numbers. ``log`` collects (kind, prompt)."""
+    def llm(prompt, system=""):
+        if '"predicates"' in system:      # defining a vocabulary, or adding to it
+            if log is not None:
+                log.append(("vocabulary" if "Make the list" in system else "extend", prompt))
+            return json.dumps({"predicates": [{"name": n, "definition": d}
+                                              for n, d in (definitions or {}).items()]})
+        if '"units_with_relations"' in system:
+            if log is not None:
+                log.append(("classify", prompt))
+            rows, unit = [], 0
+            for line in prompt.splitlines():
+                if line.startswith("["):
+                    unit += 1
+                elif line.strip().startswith("entities:") and unit:
+                    num = {name: int(n) for n, name in _UNIT_ENTITY.findall(line.split(":", 1)[1].strip())}
+                    for (s, o), p in pairs.items():
+                        if s in num and o in num:
+                            rows.append({"u": unit, "s": num[s], "p": p, "o": num[o]})
+            return json.dumps({"units_with_relations": sorted({r["u"] for r in rows}), "relations": rows})
+        if '"mapping"' in system:
+            return json.dumps({"mapping": []})
+        return json.dumps({"merge_groups": []})
+    return llm
+
+
 def test_basic_mode_builds_from_documents_with_zero_llm_calls():
     onto = build_from_documents({"budget.md": _TABLE}, chunk=False)
     assert onto.report.mode == "basic" and onto.report.llm_calls == 0
     names = {i.name: i.class_name for i in onto.instances}
     assert names["한국마사회"] == "기관명"
     assert ("한국마사회", "예산", "12억원") in {(d.entity, d.property, d.value) for d in onto.data_values}
-    assert ("한국마사회", "담당부서", "말산업연구소") in {(r.subject, r.predicate, r.object) for r in onto.relations}
+    assert ("한국마사회", "relatedTo", "말산업연구소", "담당부서") in {
+        (r.subject, r.predicate, r.object, r.label) for r in onto.relations}
     assert onto.report.quality["score"] > 0 and "class_count" in onto.report.quality
     assert onto.search("한국마사회 예산").chunks       # searchable end to end, still no LLM
 
@@ -196,19 +230,37 @@ def test_basic_mode_ignores_a_provided_llm():
     assert calls == [] and onto.report.llm_calls == 0
 
 
-def test_enrich_mode_adds_llm_relations_between_known_entities():
-    def relations_llm(prompt, system=""):
-        if "relations" in prompt and "Known entities" in prompt:
-            assert "한국마사회" in prompt                       # the deterministic entities are offered
-            return json.dumps({"relations": [
-                {"subject": "한국마사회", "predicate": "협력", "object": "농림축산식품부",
-                 "predicate_type": "ObjectProperty", "source_chunks": ["c0"]}]})
-        return json.dumps({"merge_groups": []})
+def test_enrich_mode_names_relations_unit_by_unit():
+    # no vocabulary yet: one is defined from the units first, then each unit's pairs are named
+    log = []
+    llm = relation_model({("한국마사회", "말산업연구소"): "hasDepartment", ("농림축산식품부", "축산정책과"): "hasDepartment"},
+                         definitions={"hasDepartment": "the organization has the department"}, log=log)
+    onto = build_from_documents({"budget.md": _TABLE}, llm=CallableLLM(llm), mode="enrich", chunk=False)
+    assert onto.report.mode == "enrich" and [k for k, _p in log] == ["vocabulary", "classify"]
+    rel = {(r.subject, r.predicate, r.object): r for r in onto.relations}
+    r = rel[("한국마사회", "hasDepartment", "말산업연구소")]
+    assert r.label == "담당부서" and r.source_chunks == ["budget.md#0"]     # the column name, the stating chunk
+    assert ("한국마사회", "relatedTo", "말산업연구소") not in rel             # the named relation supersedes it
+    assert ("제주특별자치도", "relatedTo", "축산과") in rel                   # an unnamed pair stays a neighbour
+    ops = {op.name: op.description for op in onto.concepts.object_properties}
+    assert ops["hasDepartment"] == "the organization has the department"  # the vocabulary is declared
+    assert onto.enriched_chunks == ["budget.md#0"] and onto.report.relation_stats["units"] == 3
 
-    onto = build_from_documents({"budget.md": _TABLE}, llm=CallableLLM(relations_llm), mode="enrich", chunk=False)
-    assert onto.report.mode == "enrich" and onto.report.llm_calls >= 1
-    assert ("한국마사회", "협력", "농림축산식품부") in {(r.subject, r.predicate, r.object) for r in onto.relations}
-    assert ("한국마사회", "담당부서", "말산업연구소") in {(r.subject, r.predicate, r.object) for r in onto.relations}
+
+def test_enrich_mode_drops_rows_that_do_not_hold_together():
+    # the graph's own vocabulary, a subject that is its object, a number out of range
+    def llm(prompt, system=""):
+        if '"units_with_relations"' in system:
+            return json.dumps({"units_with_relations": [1], "relations": [
+                {"u": 1, "s": 1, "p": "instanceOf", "o": 2}, {"u": 1, "s": 1, "p": "manages", "o": 1},
+                {"u": 9, "s": 1, "p": "manages", "o": 2}, {"u": 1, "s": 1, "p": "has department", "o": 2}]})
+        if '"predicates"' in system:
+            return json.dumps({"predicates": [{"name": "manages", "definition": "x"}]})
+        return "{}"
+
+    onto = build_from_documents({"budget.md": _TABLE}, llm=CallableLLM(llm), mode="enrich", chunk=False)
+    assert not any(r.predicate in ("manages", "instanceOf", "hasDepartment") for r in onto.relations)
+    assert onto.enriched_chunks == ["budget.md#0"]        # answered, even if with nothing usable
 
 
 def test_enrich_and_llm_modes_fall_back_to_basic_without_an_llm():

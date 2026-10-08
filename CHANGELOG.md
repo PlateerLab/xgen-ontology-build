@@ -1,3 +1,156 @@
+# 0.13.0 (2026-10-08)
+
+The build catches up with the production build (xgen-documents, develop): its relation
+pass, its store-loading rules and its term layer. Each part was checked against the
+production code on a 443-document, 14,924-chunk regulation corpus and gives the same
+result: chunk facts, Hearst pairs (5,426), concepts (24,457), entities (178,845),
+relations (2,480) and data values (2,709) with no difference; the name functions on
+153,233 inputs with no difference; units and mentions (15,907 and 66,640 on 60
+documents), batch plans (11,388 units, 198 batches) and every prompt, schema and parse of
+the relation pass identical with the product's prompts. The few places the library
+differs on purpose are listed below.
+
+## Relation formation (`mode="enrich"`)
+
+- New `relation_units`: a document is cut into units of evidence (a sentence or clause,
+  a table row) and the graph nodes each unit mentions are located and numbered, with no
+  model. A unit with fewer than two mentions is never sent, so the number of calls is
+  known before the first one.
+- New `relation_formation.RelationFormer`, the product's relation classifier. Units are
+  batched by an input budget (`char_budget`) and by the expected size of the answer,
+  learnt as calls come back. Relation names come from a vocabulary of English
+  identifiers with definitions; with none, one is defined first from units sampled
+  evenly across the corpus. The model answers with numbers (unit, subject, relation,
+  object). A cut-off answer keeps its complete part and the batch is halved; an empty
+  answer is retried once after a pause; an answer with no relation is asked once more.
+  A row that does not hold together (a number out of range, a subject that is its own
+  object, a name that is not an English identifier or is the graph's own vocabulary) is
+  dropped. Names used often enough outside the vocabulary (a natural break in their
+  frequencies, no threshold) are defined and join it.
+- `canonicalize_predicates`, run at the end of an enrich build: every relation name is
+  held to the vocabulary. A name the model maps to a vocabulary name takes it, a frequent
+  unmapped name joins the vocabulary, the rest become `relatedTo` with the old name as
+  label.
+- A relation keeps the chunk that states it as its source and, for a table row, the
+  object cell's column name as its label. The vocabulary is declared as object
+  properties with their definitions (`ObjectProperty.description`).
+- A chunk no answer came back for (a failed call, or no vocabulary to classify against)
+  is not marked enriched, so the next `extend` asks it again.
+  `BuildReport.relation_stats` reports units, calls, relations, vocabulary size, new
+  names, lost chunks and canonicalization.
+- Prompts are a `RelationPrompts`. `KO_RELATION_PROMPTS` are the product's prompts
+  verbatim; `EN_RELATION_PROMPTS` (the default) are the same instructions in English.
+- `OntologyBuilder` takes `relation_prompts`, `char_budget`, `max_output_tokens`,
+  `llm_timeout`, `max_workers`, `retry_backoff` and `should_stop`. Model limits are
+  passed in, never assumed.
+- `invoke_json_meta` returns the parsed answer with whether it was cut off, whether it
+  failed and the output tokens. An LLM with `generate_json_meta` reports these exactly;
+  otherwise the lenient reader flags a salvaged answer as cut off.
+- `DocumentExtractor.extract_relations` delegates to `RelationFormer` and takes
+  `labels_by_chunk` and `vocabulary`.
+
+## Store-loading rules (`normalize_graph`)
+
+- A relation name is an English identifier. `canon_predicate`: an ASCII name is
+  camelCased (`reports to` -> `reportsTo`); anything else becomes `relatedTo` with the
+  original as its label. Structural names (`instanceOf`, `subClassOf`, `sameAs`, ...)
+  are left as they are; `RESERVED_PREDICATE_NAMES` and `GRAPH_VOCABULARY` name them.
+- An endpoint is an existing instance or a declared class, else a new instance only
+  when it has the shape of an entity (`is_entity_shape`). A declared class is never
+  spawned as an instance.
+- The same relation stated twice is one relation: its sources are the union and its
+  weight is the number of distinct chunks that state it.
+- A pair that has a named relation drops its `relatedTo`; that relation's chunks move
+  onto the two nodes so no chunk link is lost.
+- The legacy related predicate `관련` reads as `relatedTo`. The default
+  `related_predicate` of the facades is now `relatedTo`.
+- `BuildReport.normalized` counts `relabeled` and `superseded`.
+
+## Term layer
+
+- Whether a string can be a name is judged by its shape in Unicode categories
+  (`is_name_shape`: it has a letter, it is not a sentence, its brackets are balanced),
+  not by a word list. HTML entities and escapes are decoded first.
+- Record dumps (`key: value` lines) read as one row. A whitespace row dump is a table
+  only when every row is cells; a list-marker line is prose.
+- A pipe table's title is told apart from a sentence by morphology. Escaped pipes and
+  `[Table N]` captions are read.
+- A word glued to a number does not start a name; a Hearst run does not cross a line
+  break.
+- An entity cell becomes a `relatedTo` relation labelled with its column name, for the
+  enrich pass to name. `MAX_COVERAGE` (0.30) and the document count behind it live in
+  one place.
+- `extract_from_chunk` is removed (the product removed it); `extract_chunk(...).ents`
+  gives the same names.
+
+## Hierarchy
+
+- A head whose compounds are spread over the corpus is not a type (0.12): names an
+  earlier step had already typed by that head now count toward its spread and are
+  retyped as `relatedTo` neighbours too. A table's own class and protected names are
+  left as they are. `is_name_child` is exported; the build notes count the retyped names.
+
+## Tables
+
+- Each sheet of a workbook is a table of its own (`split_sheets`); `.xlsm` is read.
+  HTML tables with row and column spans and TSV are read (`table_cell_rows`).
+- A header row repeated down a table is skipped.
+- Serial numbers that merely overlap are not a foreign key, and an FK's direction comes
+  from which side is a primary key.
+- A class made from a table is marked `Class.source = "table"`.
+
+## Retract
+
+- A relation with recorded sources goes when all of them are gone and keeps the rest
+  when some survive. A relation with no recorded sources keeps the co-occurrence rule
+  (its two ends must still share a chunk).
+
+## PgGraph
+
+- `ontology_edges` has a `label` column (added to existing tables); new tables
+  `ontology_edge_sources` (the chunks that state each relation) and `ontology_schema`
+  (the relation vocabulary as `ObjectProperty` rows, where the product keeps it).
+- `write` stores sources and the vocabulary, and an edge written again takes the new
+  weight and keeps a label it had. An appending write (`replace=False`) renames legacy
+  `관련` edges to `relatedTo` and drops a `relatedTo` edge whose pair now has a named
+  relation.
+- `prune_chunks` drops a relation with its last source; a relation that keeps some
+  sources takes their count as its weight. Relations with no sources fall back to
+  co-occurrence, and orphan source rows are cleaned. `clear` removes
+  the collection's source and schema rows too.
+- `load` reads labels, weights, sources and the vocabulary back.
+- `graph_rows` returns edges as 7-tuples `(subject, predicate, object, predicate_uri,
+  kind, weight, label)`; `edge_source_rows` is new.
+
+## Where the library differs from the product, on purpose
+
+- Weight is the number of distinct chunks that state a relation. The product adds 1 on
+  every load, so the same chunk loaded twice counts twice.
+- Retract judges a relation by its own sources. The product judges it by whether its
+  two ends still share a chunk.
+- A `relatedTo` is superseded on every build, not only when it is written to the store.
+- A column of the same name in two tables still points at the table chosen by the
+  library's rule (the table whose name matches the column, then the smaller one). For
+  differently named columns the product's rules are ported.
+- When a relation is dropped, its chunk is not linked to the subject node. The product
+  still links it.
+
+## Known limit (shared with the product)
+
+- A trailing symbol is stripped from a name, so "AA+" reads "AA". Unicode categories
+  cannot tell `+` from `×`, `=` or `→`, which are junk in the same position; a word
+  list would be the only way, and the term layer does not use one.
+
+## Removed and deprecated
+
+- `Deduplicator` no longer merges relation names (the property passes and
+  `_apply_property` are gone): relation names are held to a vocabulary instead, and the
+  "keep the original-language name" rule folded English names back into document
+  words. The pipeline no longer calls `merge_predicates`, which is deprecated;
+  `BuildReport.predicates_merged` stays for compatibility and is 0.
+- The old relations-only prompt of `DocumentExtractor` is replaced by relation
+  formation. `mode="llm"` (full extraction) is unchanged.
+
 # 0.12.6 (2026-09-29)
 
 - Hearst pattern, corrected after review: the hypernym is no longer dropped when a

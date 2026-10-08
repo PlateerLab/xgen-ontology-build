@@ -13,6 +13,7 @@ import os
 
 from .build.parse import load_documents
 from .build.pipeline import OntologyBuilder
+from .build.taxonomy import DEFAULT_RELATED_PREDICATE
 from .ontology import Ontology
 
 
@@ -21,7 +22,7 @@ def build_from_documents(documents, llm=None, *, mode: str = "basic", morphology
                          hierarchy: bool = True, resolve: bool = False, chunk: bool = True,
                          chunk_size: int = 1200, chunk_overlap: int = 150,
                          header_patterns=(), unit_scales: dict | None = None,
-                         related_predicate: str | None = "관련", dictionary=None,
+                         related_predicate: str | None = DEFAULT_RELATED_PREDICATE, dictionary=None,
                          progress=None) -> Ontology:
     """Build an ontology from text (and/or table) documents.
 

@@ -53,7 +53,7 @@ JEONKYUL = """여신 전결권 한도
 
 
 def _names(text):
-    return [e for e, _cls in dx.extract_from_chunk(text, header_patterns=[HEADER_RE])[0]]
+    return [e for e, _cls in dx.extract_chunk(text, header_patterns=[HEADER_RE]).ents]
 
 
 def _phrases(text):
@@ -136,8 +136,11 @@ def test_data_row_is_not_mistaken_for_a_header():
 def test_two_row_header_is_merged_and_identity_uses_both_columns():
     f = dx.extract_chunk(JEONKYUL)
     assert f.heads[:2] == ["신용등급", "여신종류"]
-    assert ("AAA ~ AA+ 담보대출", "여신 협의회 전결", "60 이하") in f.props
-    assert not any(p[0] == "AAA ~ AA+" for p in f.props)          # rows are not lumped by grade alone
+    # a trailing symbol is not part of a name (known limit, as in the production store: the
+    # grade suffix "+" goes with it); the two grades stay apart here
+    assert ("AAA ~ AA 담보대출", "여신 협의회 전결", "60 이하") in f.props
+    assert ("AA ~ A 담보대출", "여신 협의회 전결", "40 이하") in f.props
+    assert not any(p[0] == "AAA ~ AA" for p in f.props)           # rows are not lumped by grade alone
     # a parenthetical that does not tell names apart is decoration and is dropped
     assert not any("(" in p[0] for p in f.props)
     assert "단위 : 억원)" not in {c for _, c in f.ents}           # the bracketed note is not a caption
@@ -206,8 +209,9 @@ def test_header_carries_over_to_the_next_chunk_of_the_same_table():
     concepts, ner, relations, props = dx.extract_as_dicts(docs, corpus_chunks=50)
     got = {(d["entity"], d["property"], d["value"]) for d in props}
     assert ("렛츠런재단", "예산", "3억원") in got and ("한국마사회", "예산", "12억원") in got
-    rel = {(r["subject"], r["predicate"], r["object"]) for r in relations}
-    assert ("렛츠런재단", "담당부서", "사업팀") in rel
+    # a column name is not a relation name: the relation is relatedTo, the column name its label
+    rel = {(r["subject"], r["predicate"], r["object"], r.get("label")) for r in relations}
+    assert ("렛츠런재단", "relatedTo", "사업팀", "담당부서") in rel
     assert all(r["source_chunks"] for r in relations) and all(d["source_chunks"] for d in props)
     # one declaration per column name, no domain: shared across the collection
     assert [(p["name"], p["domain"]) for p in concepts["datatype_properties"]] == [("예산", None)]
@@ -224,7 +228,7 @@ def test_models_variant_mirrors_the_dict_variant():
     assert all(dp.domain == "" for dp in concepts.datatype_properties)
     assert ("서울특별시", "최우선변제금액", "700만원") in {
         (d.entity, d.property, d.value) for d in data_values}
-    assert any(r.predicate == "구분" for r in relations)
+    assert any(r.predicate == "relatedTo" and r.label == "구분" for r in relations)
     assert all(i.source_chunks for i in instances)
 
 

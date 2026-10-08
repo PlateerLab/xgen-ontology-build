@@ -20,6 +20,7 @@ by the embedding dedup in :mod:`.dedup`.
 from __future__ import annotations
 
 import re
+import warnings
 from collections.abc import Callable
 
 from ..models import ObjectProperty, Relation
@@ -283,7 +284,15 @@ def merge_predicates(
     wholly contained in the other's: same extension, same relation. Duplicate
     triples produced by a merge are removed. Ported from the production
     ``normalize_predicates``. Returns ``{"merged_predicates": n}``.
+
+    .. deprecated:: 0.13
+       The builder no longer calls it, as the production build no longer does: a
+       shared (subject, object) extension of a single pair merged different relations,
+       and relation names are now English identifiers held to a vocabulary by relation
+       formation (:func:`~xgen_ontology.build.relation_formation.canonicalize_predicates`).
     """
+    warnings.warn("merge_predicates is deprecated: relation names are held to a vocabulary by "
+                  "canonicalize_predicates", DeprecationWarning, stacklevel=2)
     counts: dict[str, int] = {}
     for r in relations:
         p = (r.predicate or "").strip()

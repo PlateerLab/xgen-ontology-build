@@ -25,9 +25,15 @@ from __future__ import annotations
 from collections import defaultdict
 from functools import lru_cache
 
-from ..korean import tokenize
+from ..korean import is_name_shape, tokenize
 from ..models import Class, Concepts, Instance, Relation
-from .deterministic import _COVERAGE_MIN_CHUNKS, is_common_word, prose_only  # noqa: F401  (re-exported)
+from .deterministic import (  # noqa: F401  (re-exported)
+    _COVERAGE_MIN_CHUNKS,
+    _PAREN_TAIL,
+    MAX_COVERAGE,
+    is_common_word,
+    prose_only,
+)
 
 # ───────────────────────── Hearst patterns ─────────────────────────
 
@@ -50,10 +56,10 @@ _RELATION_NOUN = "관련"
 _ANCHOR_FORM, _ANCHOR_TAG = "등", "NNB"
 
 _MIN_NAME_LEN, _MAX_NAME_LEN = 2, 20
-# Discriminativeness cap, same value the entity-extraction side uses: a name that
+# Discriminativeness cap, the value the entity-extraction side uses: a name that
 # shows up in more than this fraction of chunks isn't telling you anything about
 # what it's the hypernym *of* (the IDF intuition -- holds regardless of domain).
-_DEFAULT_MAX_COVERAGE = 0.30
+_DEFAULT_MAX_COVERAGE = MAX_COVERAGE
 # A hypernym only counts once it has this many distinct hyponyms. This is Hearst's
 # standard filter: a pair seen only once is usually a mis-parsed sentence, not a
 # real is-a relationship (observed on real data: "purchase-cap-compliance is-a
@@ -92,6 +98,7 @@ def extract_hearst_pairs(text: str) -> list[tuple[str, str]]:
     if not toks:
         return []
     toks = list(toks)
+    brk = _line_breaks(text, toks)
     out: list[tuple[str, str]] = []
     inside = _bracketed(toks)
     for i, tok in enumerate(toks):
@@ -106,7 +113,7 @@ def extract_hearst_pairs(text: str) -> list[tuple[str, str]]:
         j = i + 1
         while j < len(toks) and toks[j].tag.startswith(_PARTICLE_PREFIX):
             j += 1
-        hyper = _noun_run(toks, j, +1)
+        hyper = _noun_run(toks, j, +1, brk)
         if not _in_name_range(hyper):
             continue
         # If a derivational suffix follows ("various", "confirming"), that noun is
@@ -129,6 +136,8 @@ def extract_hearst_pairs(text: str) -> list[tuple[str, str]]:
         current: list[str] = []
         k = i - 1
         while k >= 0:
+            if (k + 1) in brk:
+                break                        # an enumeration does not cross a line break
             tag = toks[k].tag
             if tag in _NOUN_TAGS:
                 current.insert(0, toks[k].form)
@@ -148,17 +157,26 @@ def extract_hearst_pairs(text: str) -> list[tuple[str, str]]:
     return out
 
 
-def _noun_run(toks, start: int, step: int) -> str:
+def _line_breaks(text: str, toks) -> set:
+    """Indices of tokens with a line break between them and the token before. A noun run does not cross a line."""
+    return {i for i in range(1, len(toks))
+            if "\n" in text[toks[i - 1].start + toks[i - 1].len: toks[i].start]}
+
+
+def _noun_run(toks, start: int, step: int, brk=frozenset()) -> str:
+    """The nouns that follow on from ``start`` in direction ``step``, joined, stopping at a line break."""
     buf: list[str] = []
     i = start
     while 0 <= i < len(toks) and toks[i].tag in _NOUN_TAGS:
+        if i != start and ((i if step > 0 else i + 1) in brk):
+            break
         buf.append(toks[i].form)
         i += step
     return "".join(buf if step > 0 else reversed(buf))
 
 
 def _in_name_range(name: str) -> bool:
-    return bool(name) and _MIN_NAME_LEN <= len(name) <= _MAX_NAME_LEN
+    return bool(name) and _MIN_NAME_LEN <= len(name) <= _MAX_NAME_LEN and is_name_shape(name)
 
 
 def _canonical_parents(by_parent: dict[str, set]) -> dict[str, set]:
@@ -383,11 +401,18 @@ def _touched_by_new(label: str, by_len: dict[int, set], tail2: set, words: set) 
     return len(parts) > 1 and parts[0] in words
 
 
+def is_name_child(child: str, parent: str) -> bool:
+    """Is ``parent`` the head of ``child``'s name (its last piece, a trailing parenthetical set aside)?"""
+    c = _PAREN_TAIL.sub("", child or "").strip()
+    return bool(parent) and c != parent and c.endswith(parent)
+
+
 def induce_head_noun_hierarchy(
     labels: list[str], *, class_labels: set[str] | None = None, only: set[str] | None = None,
     chunks_of: dict[str, set[str]] | None = None, corpus_chunks: int | None = None,
     max_coverage: float = _DEFAULT_MAX_COVERAGE,
     doc_of: dict[str, str] | None = None, corpus_docs: int | None = None,
+    typed: dict[str, set[str]] | None = None,
 ) -> tuple[list[tuple[str, str]], dict[str, str], list[tuple[str, str]]]:
     """Names -> ``(subclass edges, sameAs renames, related pairs)``. Zero LLM calls.
 
@@ -404,8 +429,15 @@ def induce_head_noun_hierarchy(
     to those names plus the existing names they can touch. Returns ``edges`` as
     ``[(parent, child)]``, ``rename`` as ``{spelling: canonical}``, ``related`` as
     ``[(name, neighbour)]``.
+
+    ``typed`` maps a head to the names already typed under it by name structure (by an
+    earlier build or by extraction). They count as its members when the head's spread
+    is judged, so an incremental build judges a head over the whole collection; when
+    the head is too common to classify, they come back in ``related`` as well, for
+    the caller to turn their typing into a neighbour link.
     """
     class_labels = class_labels or set()
+    typed = typed or {}
     uniq = [lb for lb in dict.fromkeys(labels) if lb]
     if len(uniq) < 2:
         return [], {}, []
@@ -450,9 +482,11 @@ def induce_head_noun_hierarchy(
         # "whether"-names still turn up in most documents.
         n_docs = int(corpus_docs or (len(set(doc_of.values())) if doc_of else 0))
         if n >= _COVERAGE_MIN_CHUNKS:
-            members: dict[str, list[str]] = defaultdict(list)
+            members: dict[str, set[str]] = defaultdict(set)
             for child, parent in best.items():
-                members[parent].append(child)
+                members[parent].add(child)
+            for parent in list(members):
+                members[parent] |= set(typed.get(parent, ()))   # the collection's typings, not only this pass
             generic = set()
             for parent, kids in members.items():
                 covered = set(chunks_of.get(parent, ()))
@@ -466,6 +500,9 @@ def induce_head_noun_hierarchy(
                     generic.add(parent)
             if generic:
                 related.extend((child, parent) for child, parent in best.items() if parent in generic)
+                found = set(best)
+                related.extend((child, parent) for parent in sorted(generic)
+                               for child in sorted(typed.get(parent, ())) if child not in found)
                 best = {child: parent for child, parent in best.items() if parent not in generic}
     edges = [(parent, child) for child, parent in best.items()]
     return edges, same, related
@@ -485,6 +522,7 @@ def induce_hierarchy(
     corpus_chunks: int | None = None,
     doc_of: dict[str, str] | None = None,
     corpus_docs: int | None = None,
+    protected: set[str] | None = None,
 ) -> dict[str, int]:
     """Induce hierarchy in place: Hearst patterns over ``texts``, then name structure over classes *and* instances.
 
@@ -495,7 +533,11 @@ def induce_hierarchy(
     spelling is folded into its canonical name; a leading-word neighbour becomes a
     ``related_predicate`` relation (``None`` disables that). ``new_names`` (an
     incremental build) limits the name-structure pass to those names and the
-    existing names they can touch.
+    existing names they can touch. A head too common to classify is judged over
+    the whole collection, existing name-structure typings included, and those
+    typings become neighbour links too (``retyped``); a table-built class
+    (``Class.source == "table"``) or a name in ``protected`` is a schema identity
+    and keeps its typings.
 
     Returns ``{"hearst_classes_added", "hearst_edges_added", "compound_edges_added",
     "promoted", "typed", "renamed", "related_added"}``.
@@ -504,7 +546,7 @@ def induce_hierarchy(
     relations = relations if relations is not None else []
     existing = {c.name for c in concepts.classes if c.name}
     counts = {"hearst_classes_added": 0, "hearst_edges_added": 0, "compound_edges_added": 0,
-              "promoted": 0, "typed": 0, "renamed": 0, "related_added": 0}
+              "promoted": 0, "typed": 0, "renamed": 0, "related_added": 0, "retyped": 0}
 
     if texts:
         parent_of: dict[str, str] = {}
@@ -531,10 +573,38 @@ def induce_hierarchy(
     for c in concepts.classes:
         if c.name:
             chunks_of.setdefault(c.name, set()).update(x for x in c.source_chunks if x)
+    # Typings by name structure already in the graph: an instance typed by a class its
+    # name ends with, a class under a parent its name ends with. A schema class keeps its own.
+    keep = set(protected or ()) | {c.name for c in concepts.classes if c.source == "table"}
+    typed: dict[str, set[str]] = defaultdict(set)
+    for i in instances:
+        if i.name and i.class_name and i.class_name not in keep and is_name_child(i.name, i.class_name):
+            typed[i.class_name].add(i.name)
+    for parent, child in concepts.class_hierarchy:
+        if parent not in keep and is_name_child(child, parent):
+            typed[parent].add(child)
     edges, rename, related = induce_head_noun_hierarchy(
         [*class_labels, *inst_labels], class_labels=class_labels, only=new_names,
         chunks_of=chunks_of, corpus_chunks=corpus_chunks, max_coverage=max_coverage,
-        doc_of=doc_of, corpus_docs=corpus_docs)
+        doc_of=doc_of, corpus_docs=corpus_docs, typed=typed)
+
+    # Typings under a head too common to classify become neighbour links (added below).
+    retype = {(child, parent) for child, parent in related if child in typed.get(parent, ())}
+    if retype:
+        untyped = {child for child, _ in retype}
+        kept_i = []
+        for i in instances:
+            if (i.name, i.class_name) in retype:
+                if any(j is not i and j.name == i.name for j in instances):
+                    continue                      # another record keeps the name
+                i.class_name = ""
+            kept_i.append(i)
+        instances[:] = kept_i
+        concepts.class_hierarchy = [(p, c) for p, c in concepts.class_hierarchy if (c, p) not in retype]
+        for c in concepts.classes:
+            if c.name in untyped and (c.name, c.parent) in retype:
+                c.parent = None
+        counts["retyped"] = len(retype)
 
     # A head is a concept: an instance used as a head becomes a class (its chunks come along).
     parents = {p for p, _ in edges}

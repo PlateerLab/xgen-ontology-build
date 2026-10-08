@@ -1,15 +1,17 @@
-"""Deduplication — fold synonymous classes, properties and instances into one.
+"""Deduplication — fold synonymous classes and instances into one.
 
-Four complementary passes, each optional and degrading gracefully:
+Three complementary passes, each optional and degrading gracefully:
 
 1. **instance normalization** (rule) — same content morphemes -> one name. Uses a
    :class:`~xgen_ontology.protocols.Morphology` analyzer if given, else a cleaned
    lowercase key (English-neutral).
-2. **object-property normalization** (rule) — group by (domain, range, form-key),
-   then by (domain, range), keeping the shortest canonical name.
-3. **LLM synonymy** — classes, then object-properties: ask an LLM for merge groups.
-4. **vector dedup** (embedding) — cosine-cluster names whose *meaning* matches even
-   though the surface form differs.
+2. **LLM synonymy** — classes: ask an LLM for merge groups.
+3. **vector dedup** (embedding) — cosine-cluster class names whose *meaning* matches
+   even though the surface form differs.
+
+Relation names are not folded here. They are English identifiers held to one
+vocabulary by relation formation
+(:func:`~xgen_ontology.build.relation_formation.canonicalize_predicates`).
 """
 from __future__ import annotations
 
@@ -29,9 +31,6 @@ _SEP = re.compile(r"[\s_\-·•/\\()（）「」『』【】\[\]]+")
 _KEY_TAGS = ("SL", "SH", "SW", "XPN", "SN")
 _QUOTE_CATEGORIES = ("Pi", "Pf")
 _QUOTE_NAME_PARTS = ("QUOTATION MARK", "APOSTROPHE", "PRIME", "GRAVE ACCENT")
-_EN_NOISE = re.compile(
-    r"(to|from|of|by|with|for|the|and|or|is|are|has|have|belongs|connection|link|relation|mapping|reference)"
-)
 
 
 class Deduplicator:
@@ -72,26 +71,6 @@ class Deduplicator:
                 self._apply_class(rename, concepts, instances)
                 merged += len(rename)
 
-        if len(concepts.object_properties) >= 2:
-            rename = self._normalize_object_properties(concepts.object_properties)
-            if rename:
-                self._apply_property(rename, concepts, relations, data_values)
-                merged += len(rename)
-
-        if len(concepts.object_properties) >= 3:
-            rename = self._llm_synonyms(
-                [f"- {p.name} (domain: {p.domain or '?'}, range: {p.range or '?'})"
-                 for p in concepts.object_properties if p.name],
-                system="You identify synonymous relations (object properties).",
-                rules=("Merge only different names for the *same* relation.\n"
-                       "Treat a term and its translation as the same (keep the original-language name).\n"
-                       "Merge more readily when domain and range match."),
-                label="relation",
-            )
-            if rename:
-                self._apply_property(rename, concepts, relations, data_values)
-                merged += len(rename)
-
         rename = self._vector_dedup([c.name for c in concepts.classes if c.name])
         if rename:
             self._apply_class(rename, concepts, instances)
@@ -100,11 +79,15 @@ class Deduplicator:
         return merged
 
     def compute_rename_map(self, concepts: Concepts) -> dict[str, str]:
-        """Schema synonym map only (classes + object properties), nothing applied.
+        """Class synonym map only, nothing applied.
 
-        The same LLM and rule passes as :meth:`deduplicate`, flattened
-        (``a->b, b->c`` becomes ``a->c``) with self-maps removed. Used by the
-        enrich build, which folds synonyms after the base build rather than during it.
+        The same LLM pass as :meth:`deduplicate`, flattened (``a->b, b->c`` becomes
+        ``a->c``) with self-maps removed. Used by the enrich build, which folds
+        synonyms after the base build rather than during it. Relation names are not
+        merged here: they are English identifiers held to a vocabulary by relation
+        formation (:func:`~xgen_ontology.build.relation_formation.canonicalize_predicates`). A
+        "keep the original-language name" rule over relation names folded the English
+        vocabulary back into document words.
         """
         rename: dict[str, str] = {}
         classes = [c for c in concepts.classes if c.name]
@@ -116,18 +99,6 @@ class Deduplicator:
                        "Treat a term and its translation as the same (keep the original-language name).\n"
                        "Never merge a parent with its subclass."),
                 label="class"))
-        props = concepts.object_properties
-        if len(props) >= 2:
-            rename.update(self._normalize_object_properties(props))
-        named = [p for p in props if p.name]
-        if len(named) >= 3:
-            rename.update(self._llm_synonyms(
-                [f"- {p.name} (domain: {p.domain or '?'}, range: {p.range or '?'})" for p in named],
-                system="You identify synonymous relations (object properties).",
-                rules=("Merge only different names for the *same* relation.\n"
-                       "Treat a term and its translation as the same (keep the original-language name).\n"
-                       "Merge more readily when domain and range match."),
-                label="relation"))
         flat: dict[str, str] = {}
         for k, v in rename.items():
             if not k or not v:
@@ -170,10 +141,6 @@ class Deduplicator:
                     return "".join(nouns).lower()
         return cleaned.lower()
 
-    def _norm_prop_key(self, name: str) -> str:
-        key = self._norm_key(name)
-        return _EN_NOISE.sub("", key)
-
     def _normalize_instances(self, instances: list[Instance]) -> dict[str, str]:
         """Same key -> one name; the canonical is the shortest spelling (closest to the base form)."""
         groups: dict[str, list[str]] = {}
@@ -189,35 +156,6 @@ class Deduplicator:
             if len(names) < 2:
                 continue
             canon = min(names, key=lambda s: (len(s), s))
-            for n in names:
-                if n != canon:
-                    rename[n] = canon
-        return rename
-
-    def _normalize_object_properties(self, obj_props) -> dict[str, str]:
-        rename: dict[str, str] = {}
-        groups: dict[tuple, list[str]] = {}
-        for p in obj_props:
-            if not p.name:
-                continue
-            groups.setdefault((p.domain, p.range, self._norm_prop_key(p.name)), []).append(p.name)
-        for names in groups.values():
-            if len(names) <= 1:
-                continue
-            canon = _canonical(names)
-            for n in names:
-                if n != canon:
-                    rename[n] = canon
-        dr: dict[tuple, set] = {}
-        for p in obj_props:
-            name = rename.get(p.name, p.name)
-            if p.domain and p.range:
-                dr.setdefault((p.domain, p.range), set()).add(name)
-        for names_set in dr.values():
-            names = list(names_set)
-            if len(names) <= 1:
-                continue
-            canon = _canonical(names)
             for n in names:
                 if n != canon:
                     rename[n] = canon
@@ -299,28 +237,6 @@ class Deduplicator:
             dp.domain = rename.get(dp.domain, dp.domain)
         for inst in instances:
             inst.class_name = rename.get(inst.class_name, inst.class_name)
-
-    @staticmethod
-    def _apply_property(rename, concepts: Concepts, relations, data_values) -> None:
-        seen: set[str] = set()
-        deduped = []
-        for op in concepts.object_properties:
-            op.name = rename.get(op.name, op.name)
-            if op.name not in seen:
-                deduped.append(op)
-                seen.add(op.name)
-        concepts.object_properties = deduped
-        for rel in relations:
-            rel.predicate = rename.get(rel.predicate, rel.predicate)
-        for dv in data_values:
-            dv.property = rename.get(dv.property, dv.property)
-
-
-def _canonical(names: list[str]) -> str:
-    """Prefer a Korean (Hangul) name, else shortest; ties broken lexicographically."""
-    ko = [n for n in names if any(0xAC00 <= ord(c) <= 0xD7A3 for c in n)]
-    pool = ko or names
-    return min(pool, key=lambda s: (len(s), s))
 
 
 def cluster_by_cosine(names: list[str], vectors, threshold: float = 0.7) -> dict[str, str]:

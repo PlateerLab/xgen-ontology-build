@@ -24,15 +24,18 @@ class Class:
     description: str = ""
     parent: str | None = None
     source_chunks: list[str] = field(default_factory=list)
+    source: str = ""   # "table" for a class built from a table's schema: a deterministic identity
 
 
 @dataclass
 class ObjectProperty:
-    """A relation between classes (``owl:ObjectProperty``)."""
+    """A relation between classes (``owl:ObjectProperty``). ``description`` defines the relation
+    name, so a vocabulary of relation names can be shown to a model with its meanings."""
 
     name: str
     domain: str = ""
     range: str = ""
+    description: str = ""
 
 
 @dataclass
@@ -69,13 +72,21 @@ class Instance:
 
 @dataclass
 class Relation:
-    """An asserted edge between two individuals (or to a literal)."""
+    """An asserted edge between two individuals (or to a literal).
+
+    ``label`` is how the document itself names the relation (a table's column name,
+    the original spelling of a name the graph could not keep as a predicate); the
+    predicate stays an identifier. ``weight`` is how many times the relation was
+    asserted, and ``source_chunks`` are the chunks that assert it.
+    """
 
     subject: str
     predicate: str
     object: str
     predicate_type: str = "ObjectProperty"  # or "DatatypeProperty"
     source_chunks: list[str] = field(default_factory=list)
+    label: str | None = None
+    weight: float = 1.0
 
 
 @dataclass
@@ -154,6 +165,7 @@ class BuildReport:
     chunks: int = 0            # chunks the ontology has seen (grows with extend())
     mode: str = ""             # "basic" | "enrich" | "llm"
     normalized: dict = field(default_factory=dict)   # normalize_graph() counts (rerouted / dropped)
+    relation_stats: dict = field(default_factory=dict)   # relation formation: units, calls, vocabulary, lost
     retracted: dict = field(default_factory=dict)    # retract_chunks() counts of the last retraction
     quality: dict = field(default_factory=dict)   # review_quality() of the finished build
     notes: list[str] = field(default_factory=list)

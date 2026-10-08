@@ -8,12 +8,13 @@ Two modes, mirroring the production build:
   to their source chunk ids.
 * **relations only** (:meth:`DocumentExtractor.extract_relations`) -- the enrich
   pass. Entities and classes already exist (from the zero-LLM
-  :mod:`.deterministic` build); the model is asked only to connect the known
-  entities, choosing from the predicates already in use where possible.
+  :mod:`.deterministic` build); the work is done by
+  :class:`~xgen_ontology.build.relation_formation.RelationFormer`, which names the
+  relations between numbered mentions unit by unit from one vocabulary.
 
-Shared post-processing, all rule-based: a data value whose value is a known
-entity is really a relation (and the reverse), sentence fragments returned as
-entity names are shortened to the name, relation direction is voted on, and
+Post-processing of the full mode, all rule-based: a data value whose value is a
+known entity is really a relation (and the reverse), sentence fragments returned
+as entity names are shortened to the name, relation direction is voted on, and
 predicates are governed to one vocabulary. A junk filter skips machine dumps
 before spending a call; merging is conservative (reuse an existing class only
 for the *same* concept -- synonym folding happens later in :mod:`.dedup`).
@@ -31,7 +32,7 @@ from ..korean import is_sentence_like
 from ..llm import invoke_json
 from ..models import Class, Concepts, DataProperty, DataValue, Instance, ObjectProperty, Relation
 from .dedup import shorten_entity_name
-from .deterministic import extract_from_chunk, is_value, strip_headers
+from .deterministic import is_value, strip_headers
 from .govern import apply_canonical_predicates, govern_predicates, vote_relation_direction
 
 _CJK = re.compile(r"[가-힣ᄀ-ᇿ㄰-㆏぀-ヿ一-鿿㐀-䶿]")
@@ -48,8 +49,6 @@ KEY_ALIASES = {
                             "data_properties", "dataproperties", "데이터속성"),
 }
 
-_REL_KNOWN_MAX = 200     # known entities listed to the relations-only prompt
-_REL_PRED_MAX = 60       # known predicates listed to the relations-only prompt
 
 # JSON-schema caps for structured output (a guard against runaway arrays, not a quota).
 _SCHEMA_MAX_ITEMS = 60
@@ -273,30 +272,6 @@ _USER_TEMPLATE = """Extract an ontology schema and instances from the document.
 }}"""
 _REL_EXAMPLE = '\n  "relations": [{{"subject": "...", "predicate": "...", "object": "...", "predicate_type": "ObjectProperty"{src_field}}}],'
 
-_RELATIONS_SYSTEM = (
-    "You are a knowledge-graph engineer. Extract only the relations between entities that "
-    "were already extracted.\n"
-    "Principles:\n"
-    "1. Extract every relation (subject-predicate-object), including links between a table's "
-    "row entity and its column items.\n"
-    "2. Never invent a relation the document does not support. No guessing.\n"
-    "3. Spell subject and object exactly as in the known-entity list where possible; an entity "
-    "named in the document but missing from the list may still be used.\n"
-    "4. Predicates are short noun phrases of 1-3 words; no sentence-like or inflected forms; one "
-    "name per meaning.\n"
-    "5. When a list of known predicates is given, choose from it; coin a new predicate only when "
-    "none of them can express the relation.\n"
-    "6. Do not extract classes, properties or numeric values. Relations only."
-)
-_RELATIONS_USER_TEMPLATE = """Extract the relations between entities in the document.
-{known_block}{pred_block}
-{text}
-{source_instruction}
-One relation is one element of the "relations" array; the predicate is the actual relation
-between the two entities as the document states it.
-{{"relations": [{{"subject": "...", "predicate": "...", "object": "...", "predicate_type": "ObjectProperty"{src_field}}}]}}"""
-
-
 class DocumentExtractor:
     """Extract a typed ontology from chunked documents using an LLM."""
 
@@ -342,34 +317,43 @@ class DocumentExtractor:
         self, documents: dict[str, list[dict]], *,
         known_entities: list[str] | None = None,
         known_predicates: list[str] | None = None,
+        labels_by_chunk: dict[str, list[str]] | None = None,
+        vocabulary: list[dict[str, str]] | None = None,
     ) -> list[Relation]:
-        """The enrich pass: relations only, between entities that already exist.
+        """The relation pass: relations only, between entities that already exist.
 
-        Each batch is shown the entities the zero-LLM extractor finds in its own
-        chunks first, topped up from ``known_entities``, and the predicates
-        already in use (``known_predicates``). Direction vote and predicate
-        governance run over the result.
+        Delegates to :class:`~xgen_ontology.build.relation_formation.RelationFormer`: the
+        documents are cut into units of evidence and the model names the relation between
+        two numbered mentions of one unit. ``labels_by_chunk`` (chunk id -> node labels) says
+        which nodes each chunk mentions; without it every chunk is matched against
+        ``known_entities``. ``vocabulary`` (``[{"name", "definition"}]``) is the relation
+        names to prefer; ``known_predicates`` alone gives names without definitions.
+        Statistics land on :attr:`last_relation_stats` and chunks no answer came back for on
+        :attr:`lost_chunk_ids`.
         """
-        relations: list[Relation] = []
-        for doc, chunks in documents.items():
-            for _c, _i, dr, _v in self._run_batches(doc, chunks, None, "", relations_only=True,
-                                                     known_entities=known_entities,
-                                                     known_predicates=known_predicates):
-                relations.extend(dr)
-        vote_relation_direction(relations, {})
-        govern_predicates(relations, None, known_predicates)
+        from .relation_formation import RelationFormer  # local import: relation_formation imports this module
+
+        if labels_by_chunk is None:
+            known = [e for e in (known_entities or []) if e]
+            labels_by_chunk = {str(ch.get("chunk_id")): known for chs in documents.values() for ch in chs
+                               if ch.get("chunk_id")}
+        if vocabulary is None:
+            vocabulary = [{"name": p, "definition": ""} for p in (known_predicates or []) if p]
+        former = RelationFormer(self.llm, header_patterns=self.header_patterns)
+        relations, stats = former.extract(documents, labels_by_chunk, vocabulary=vocabulary, domain=self.domain)
+        self.llm_calls += former.llm_calls
+        self.last_relation_stats = stats
+        self.lost_chunk_ids = set(former.lost_chunk_ids)
         return relations
 
     # ── batching ──
 
-    def _run_batches(self, doc, chunks, existing, schema_context, *, relations_only=False,
-                     known_entities=None, known_predicates=None):
+    def _run_batches(self, doc, chunks, existing, schema_context):
         chunks = _split_oversized_chunks(chunks, self.max_text_len)
         pending = [(b, 0) for b in reversed(self._batches(chunks))]
         while pending:
             batch, depth = pending.pop()
-            r = self._extract_batch(doc, batch, existing, schema_context, relations_only=relations_only,
-                                    known_entities=known_entities, known_predicates=known_predicates)
+            r = self._extract_batch(doc, batch, existing, schema_context)
             if r == "junk":
                 continue
             if r is None:
@@ -397,35 +381,23 @@ class DocumentExtractor:
             batches.append(cur)
         return batches
 
-    def _extract_batch(self, doc, batch, existing, schema_context, *, relations_only=False,
-                       known_entities=None, known_predicates=None):
+    def _extract_batch(self, doc, batch, existing, schema_context):
         chunk_ids = [c.get("chunk_id", "") for c in batch]
-        alias_of, real_of = {}, {}
-        if relations_only:
-            # Short aliases (c0, c1, ...) keep the reply small; unknown ids are never kept.
-            for i, cid in enumerate(chunk_ids):
-                if cid:
-                    alias_of[cid] = "c%d" % i
-                    real_of["c%d" % i] = cid
         parts = []
         for c in batch:
             cid, text = c.get("chunk_id", ""), strip_headers(c.get("chunk_text", ""), self.header_patterns)
-            parts.append(f"[CHUNK:{alias_of.get(cid, cid)}]\n{text}" if cid else text)
+            parts.append(f"[CHUNK:{cid}]\n{text}" if cid else text)
         combined = "\n\n".join(parts)
         if not combined.strip() or not _is_extractable(combined):
             return "junk"
         text = combined[:16000]
-        valid = [alias_of.get(cid, cid) for cid in chunk_ids if cid]
-        fallback = [cid for cid in chunk_ids if cid]
+        valid = [cid for cid in chunk_ids if cid]
+        fallback = valid
         src_instruction, src_field = "", ""
         if valid:
             src_instruction = (f"\n- source_chunks: record the chunk id each item came from "
                                f"(see the [CHUNK:id] markers). Available: {valid}\n")
             src_field = ', "source_chunks": ["chunk_id"]'
-
-        if relations_only:
-            return self._relations_batch(doc, batch, text, valid, fallback, real_of, src_instruction,
-                                         src_field, known_entities, known_predicates)
 
         context = ""
         if existing is not None and existing.classes:
@@ -492,43 +464,6 @@ class DocumentExtractor:
         if self.unit_scales:
             verify_numeric_units(data_values, combined, self.unit_scales)
         return concepts, instances, relations, data_values
-
-    def _relations_batch(self, doc, batch, text, valid, fallback, real_of, src_instruction,
-                         src_field, known_entities, known_predicates):
-        local: list[str] = []
-        seen_local: set[str] = set()
-        try:
-            for c in batch:
-                for n, _cls in extract_from_chunk(c.get("chunk_text") or "", self.header_patterns)[0]:
-                    if n not in seen_local:
-                        seen_local.add(n)
-                        local.append(n)
-        except Exception:
-            local = []
-        known = local[:_REL_KNOWN_MAX]
-        if len(known) < _REL_KNOWN_MAX:
-            have = set(known)
-            known += [e for e in (known_entities or []) if e and e not in have][:_REL_KNOWN_MAX - len(known)]
-        known_block = ("\n## Known entities (connect these)\n" + ", ".join(known)) if known else ""
-        preds = [q for q in (known_predicates or []) if q][:_REL_PRED_MAX]
-        pred_block = ("\n## Known predicates (choose from these where possible)\n" + ", ".join(preds)) if preds else ""
-        user = _RELATIONS_USER_TEMPLATE.format(known_block=known_block, pred_block=pred_block, text=text,
-                                               source_instruction=src_instruction, src_field=src_field)
-        schema = extraction_schema(bool(valid), relations_only=True) if self.use_schema else None
-        result = invoke_json(self.llm, _RELATIONS_SYSTEM, user, schema=schema)
-        self.llm_calls += 1
-        if not result:
-            return None
-        result = _normalize_keys(result)
-
-        def unalias(vals):
-            out = [real_of[v] for v in (vals or []) if v in real_of]
-            return out or fallback
-
-        relations = [Relation(subject=r.get("subject", ""), predicate=r.get("predicate", ""),
-                              object=r.get("object", ""), source_chunks=unalias(r.get("source_chunks")))
-                     for r in result.get("relations", []) if r.get("subject") and r.get("predicate")]
-        return Concepts(), [], relations, []
 
     # ── post-processing (rule-based) ──
 

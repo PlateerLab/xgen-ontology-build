@@ -9,10 +9,13 @@ post-build sees the current corpus. The rules, in the store's order:
 1. an entity's *evidence* is every chunk that links it: its own source chunks, the
    chunks of the relations it takes part in (both ends) and the chunks of its
    attributes. ``touched`` = the names that lose at least one chunk
-2. a relation between two touched names whose ends no longer share a surviving
-   chunk has lost its evidence and is dropped. Relations made from name structure
-   (``structural_predicates``: the "related" link, ``sameAs``) are not chunk
-   evidence and stay
+2. a relation with source chunks of its own is judged by them: it is dropped when
+   every one of them was removed, and keeps the rest otherwise. A relation with no
+   source chunks between two touched names whose ends no longer share a surviving
+   chunk has lost its evidence and is dropped, except the links made from name
+   structure (``structural_predicates``: the "related" link, ``sameAs``), which are
+   not chunk evidence and stay. (The production store judges every relation by its
+   ends' co-occurrence; a relation's own sources are the stricter evidence.)
 3. a touched individual with no evidence left is an orphan
 4. a class with no evidence left is an orphan unless something still refers to it:
    a surviving individual typed by it, a subclass, a property that ranges over it,
@@ -72,7 +75,13 @@ def retract_chunks(concepts: Concepts, instances: list[Instance], relations: lis
     # 2. relations whose only co-occurrence was in the removed chunks
     kept_relations: list[Relation] = []
     for r in relations:
-        if (r.predicate_type != "DatatypeProperty" and r.predicate not in structural
+        own = {c for c in r.source_chunks if c}
+        if r.predicate_type != "DatatypeProperty" and own:
+            if own <= gone_chunks:
+                stats["relations"] += 1          # every chunk that asserted it is gone
+                continue
+            r.source_chunks = keep_chunks(r.source_chunks)
+        elif (r.predicate_type != "DatatypeProperty" and r.predicate not in structural
                 and r.subject in touched and r.object in touched
                 and not (remaining.get(r.subject, set()) & remaining.get(r.object, set()))):
             stats["relations"] += 1

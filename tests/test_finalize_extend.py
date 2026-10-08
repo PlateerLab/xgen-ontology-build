@@ -29,7 +29,12 @@ def test_normalize_graph_applies_the_store_loading_rules():
                  Relation("말산업연구소", "instanceOf", "부서"), Relation("공기업", "subClassOf", "기관"),
                  Relation("한국마사회", "예산", "12억원"), Relation("한국마사회", "설립", "1949"),
                  Relation("2020", "연도", "2020"), Relation("마사회", "sameAs", "한국마사회"),
-                 Relation("한국마사회", "소속", "농림축산식품부"), Relation("한국마사회", "소속", "농림축산식품부")]
+                 Relation("한국마사회", "소속", "농림축산식품부"), Relation("한국마사회", "소속", "농림축산식품부"),
+                 Relation("한국마사회", "reports to", "기획재정부"),
+                 Relation("한국마사회", "협력", "제주특별자치도", source_chunks=["c3"]),
+                 Relation("한국마사회", "relatedTo", "제주특별자치도", source_chunks=["c4"]),
+                 Relation("한국마사회", "partner_of", "제주특별자치도", source_chunks=["c5"]),
+                 Relation("한국마사회", "소속", "이 규정에서 정하지 아니한 사항은 관련 법령과 회사의 내부통제기준 및 이사회가 따로 정하는 세부 운영지침에 따르며 그 밖에 필요한 사항은 대표이사가 정한다", source_chunks=["c6"])]
     data_values = [DataValue("마사회", "자본금", "500억원"), DataValue("2020", "연도", "2020")]
     stats = normalize_graph(concepts, instances, relations, data_values)
 
@@ -42,8 +47,18 @@ def test_normalize_graph_applies_the_store_loading_rules():
     assert ("김철수", "직원") in typed and ("말산업연구소", "부서") in typed   # typing statements became types
     assert ("한국마사회", "기관") in typed and ("한국마사회", "") not in typed  # merged, untyped record redundant
     assert ("연혁", "") in typed                                          # its class was junk: untyped, kept
-    rel = {(r.subject, r.predicate, r.object) for r in relations}
-    assert rel == {("김철수", "소속", "말산업연구소"), ("한국마사회", "소속", "농림축산식품부")}
+    rel = {(r.subject, r.predicate, r.object): r for r in relations}
+    # A relation's name is an English identifier; a document word stays as the label.
+    assert rel[("김철수", "relatedTo", "말산업연구소")].label == "소속"
+    assert rel[("한국마사회", "reportsTo", "기획재정부")].label is None
+    # One record per triple: the two assertions add up to weight 2.
+    assert rel[("한국마사회", "relatedTo", "농림축산식품부")].weight == 2.0
+    # A named relation supersedes the unnamed links between the same pair, sources and all.
+    assert ("한국마사회", "partnerOf", "제주특별자치도") in rel
+    assert ("한국마사회", "relatedTo", "제주특별자치도") not in rel and stats["superseded"] == 1
+    # An endpoint that is not an entity's shape (longer than a row label) cannot be an endpoint.
+    assert not any(o.startswith("이 규정에서") for _, _, o in rel)
+    assert not any(i.name.startswith("이 규정에서") for i in instances)
     dv = {(d.entity, d.property, str(d.value)) for d in data_values}
     assert ("한국마사회", "예산", "12억원") in dv and ("한국마사회", "설립", "1949") in dv
     assert ("한국마사회", "자본금", "500억원") in dv                       # sameAs folded 마사회 into 한국마사회
@@ -91,20 +106,38 @@ def test_extend_builds_only_the_new_chunks_and_matches_a_full_build():
 
 
 def test_extend_in_enrich_mode_only_asks_for_unenriched_chunks():
-    asked = []
+    from test_postbuild import relation_model
 
-    def llm(prompt, system=""):
-        if "Known entities" in prompt:
-            asked.append(prompt)
-            return json.dumps({"relations": []})
-        return json.dumps({"merge_groups": []})
-
+    log = []
+    llm = relation_model({("렛츠런재단", "사업팀"): "hasDepartment"}, definitions={"hasDepartment": "has the team"},
+                         log=log)
     builder = OntologyBuilder(CallableLLM(llm), mode="enrich", chunk=False)
     onto = builder.build({"a.md": _T1})
-    assert onto.enriched_chunks == ["a.md#0"] and len(asked) == 1
+    # nothing to name in a.md: an answer with no relation is asked once more, then taken
+    assert onto.enriched_chunks == ["a.md#0"] and [k for k, _p in log] == ["vocabulary", "classify", "classify"]
     builder.extend(onto, {"a.md": _T1, "b.md": _T2})
-    assert onto.enriched_chunks == ["a.md#0", "b.md#0"] and len(asked) == 2
-    assert "[CHUNK:c0]" in asked[1] and "렛츠런재단" in asked[1] and "한국마사회 제주본부" not in asked[0]
+    # the vocabulary is kept, so only the new chunk is classified
+    assert onto.enriched_chunks == ["a.md#0", "b.md#0"] and [k for k, _p in log][3:] == ["classify"]
+    assert "렛츠런재단" in log[3][1] and "렛츠런재단" not in log[1][1]
+    assert ("렛츠런재단", "hasDepartment", "사업팀") in {(r.subject, r.predicate, r.object) for r in onto.relations}
+
+
+def test_a_chunk_no_answer_came_back_for_is_asked_again():
+    answer = {"ok": False}
+
+    def llm(prompt, system=""):
+        if '"units_with_relations"' in system:
+            return json.dumps({"units_with_relations": [], "relations": []}) if answer["ok"] else "not json"
+        if '"predicates"' in system:
+            return json.dumps({"predicates": [{"name": "hasDepartment", "definition": "x"}]})
+        return "{}"
+
+    builder = OntologyBuilder(CallableLLM(llm), mode="enrich", chunk=False, retry_backoff=0)
+    onto = builder.build({"a.md": _T1})
+    assert onto.enriched_chunks == [] and onto.report.relation_stats["lost_chunks"] == 1
+    answer["ok"] = True
+    builder.extend(onto, {"a.md": _T1})
+    assert onto.enriched_chunks == ["a.md#0"]
 
 
 # ───────────────────────── IRI translation ─────────────────────────

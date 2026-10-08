@@ -68,6 +68,49 @@ def invoke_json(llm: Any, system: str, user: str, *, schema: dict | None = None)
     return obj if isinstance(obj, dict) else {}
 
 
+def invoke_json_meta(llm: Any, system: str, user: str, *, schema: dict | None = None,
+                     max_tokens: int | None = None, timeout: float | None = None) -> tuple[dict, dict]:
+    """:func:`invoke_json` that also says how the call went: ``(obj, meta)``.
+
+    ``meta`` holds ``truncated`` (the reply was cut off: it had to be closed to parse),
+    ``failed`` (the call raised or nothing could be parsed) and ``out_tokens`` (0 when
+    unknown). An LLM may expose ``generate_json_meta(prompt, system=, schema=,
+    max_tokens=, timeout=)`` returning ``(dict | str, meta)`` to report these exactly
+    (its provider knows the finish reason and the token count); otherwise they are read
+    off the reply, which is what any model gives.
+    """
+    meta = {"truncated": False, "failed": False, "out_tokens": 0}
+    if llm is None:
+        meta["failed"] = True
+        return {}, meta
+    try:
+        if hasattr(llm, "generate_json_meta"):
+            raw, given = llm.generate_json_meta(user, system=system, schema=schema, max_tokens=max_tokens,
+                                                timeout=timeout)
+            meta.update({k: v for k, v in (given or {}).items() if k in meta})
+        elif schema is not None and hasattr(llm, "generate_json"):
+            raw = llm.generate_json(user, system=system, schema=schema)
+        else:
+            try:
+                raw = llm.generate(user, system=system, timeout=timeout)
+            except TypeError:
+                raw = llm.generate(user, system=system)
+    except Exception:
+        meta["failed"] = True
+        return {}, meta
+    if isinstance(raw, dict):
+        return raw, meta
+    if not raw or not isinstance(raw, str):
+        meta["failed"] = True
+        return {}, meta
+    obj, salvaged = _parse_with_salvage(raw)
+    meta["truncated"] = meta["truncated"] or salvaged
+    if not isinstance(obj, dict):
+        meta["failed"] = True
+        return {}, meta
+    return obj, meta
+
+
 def parse_json_lenient(text: str) -> dict | None:
     """Accept JSON however the model wraps it.
 
@@ -76,8 +119,13 @@ def parse_json_lenient(text: str) -> dict | None:
     truncation salvage. A top-level array is wrapped as ``{"entities": [...]}``
     so callers can keep using ``.get``.
     """
+    return _parse_with_salvage(text)[0]
+
+
+def _parse_with_salvage(text: str) -> tuple[dict | None, bool]:
+    """:func:`parse_json_lenient`, and whether the reply had to be closed (it was cut off)."""
     if not isinstance(text, str):
-        return None
+        return None, False
     content = text.strip()
     m = _FENCE.search(content)
     if m:
@@ -96,15 +144,17 @@ def parse_json_lenient(text: str) -> dict | None:
         cut = _balanced(content)
         if cut:
             obj = _try(cut) or _try(_relax(cut))
+    salvaged = False
     if obj is None:
         obj = salvage_truncated(content)
+        salvaged = obj is not None
     if obj is None:
-        return None
+        return None, False
     if isinstance(obj, dict):
-        return obj
+        return obj, salvaged
     if isinstance(obj, list):
-        return {"entities": obj}
-    return None
+        return {"entities": obj}, salvaged
+    return None, False
 
 
 def _relax(txt: str) -> str:
