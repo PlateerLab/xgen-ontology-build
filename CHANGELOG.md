@@ -1,3 +1,96 @@
+# 0.14.0 (2026-10-08)
+
+A second pass over the production build (xgen-documents, develop 58429bd), area by area:
+the LLM-free extraction, the table build, the relation pass and the post-build were read
+against the library end to end, and what still stood apart is brought over here. The
+deterministic extraction was unchanged and still gives the production code's result on the
+regulation corpus (60 documents, 1,532 chunks re-checked: chunk facts, Hearst pairs,
+concepts, entities, relations and data values identical).
+
+## Rows of a database table
+
+- `build_from_rows`, `OntologyBuilder.build_rows` / `extend_rows` and the facade
+  `build_from_db_rows`: the production loader's path for a SELECT result, which the
+  library only approximated through CSV text. The schema is declared, not guessed:
+  `pk_candidates`, `label_column`, `column_types`, `fk_relations` (each checked by
+  `normalize_fk_relations`: the key column must be a column of the rows and must point at
+  the target's primary key).
+- A value's xsd type comes from its Python type (`xsd_type_of`: bool, int, Decimal and
+  float, datetime, date) and its literal from `value_text` (`true` / `false`, ISO 8601
+  dates, decoded bytes, JSON for dict and list columns). A column's type is its first
+  recorded value's.
+- Every row is its own source, `"{source_id}:{pk}"` (`"{source_id}:row{i}"` without a key),
+  kept as a chunk whose text is the row's `column: value` lines (`row_chunks`), so one row
+  can be retracted, searched and loaded again on its own. `extend_rows` retracts a row
+  loaded before and loads it again, so a changed attribute does not pile up next to the
+  old one.
+- A foreign-key cell that is SQL NULL makes no relation; an empty string still points at
+  `"{to_table}_"`, as in production. A single table is never a fact table.
+- `build_from_csv` takes `header_patterns`; `.xlsm` is a table extension in the facade too.
+
+## Relation formation in groups
+
+- The pass runs in groups of about `group_size` chunks (default 300, the production
+  `ONTOLOGY_BUILD_GROUP_SIZE`), a document never split. The vocabulary a group defines or
+  grows is declared before the next group, which classifies against it, and the next
+  group's batches are planned with what the calls so far taught about relations per unit
+  and tokens per item. Before, one plan and one pass covered the whole corpus, so a
+  vocabulary grown on the way never reached a classification prompt within the build.
+  `BuildReport.relation_stats` gains `groups`.
+- `should_stop`: a stop inside a group discards that group whole (its relations, its
+  vocabulary, its enriched marks), as the production cancel does; the groups before are
+  kept, the end-of-build canonicalization and the LLM class synonyms are not run, and the
+  report says so (`relation_stats["stopped"]`, a note).
+- A provider that reports `length_error` from `generate_json_meta` is read as a cut-off
+  answer: the batch is halved as for a truncated one.
+- Canonicalization shows the model each name's two best-evidenced examples (weight, then
+  subject), as the production store query does.
+
+## Post-build
+
+- Class synonym folding (LLM) and vector class dedup run when text was extracted in this
+  build, as in production (a table-only or rows-only build has none to find); the LLM pass
+  sees at most `max_classes` (500) classes, and names it folds are not offered to the
+  vector pass, so a name is not folded and a cluster's canonical at once.
+- `extend` and `retract` take `doc_of` (chunk id -> document) for chunks a loaded graph
+  holds without a document, so the spread of a head noun is measured over the right number
+  of documents; the document is remembered on the chunk afterwards.
+- `review_quality` counts `orphan_class_count` (classes nothing instantiates and no object
+  property declares) with the production warning, counts a dangling subject as well as a
+  dangling object, and takes a relation's own source chunks as grounding.
+
+## PgGraph
+
+- A node keeps the URI the store holds it under: `load` fills `Ontology.uris`
+  (`(kind, label) -> uri`), `graph_rows` and `write` use it, and an appending write reads
+  the rows as they are now (`label_uris`). A head promoted to a class keeps the instance
+  URI it was stored under and changes kind, as the production promotion does. Before, a
+  promoted head came back from the store as a second node under a new URI.
+- `write_schema`: `ontology_schema` gets every class (description, parent, `source='csv'`
+  for a class built from a table, which the product's dedupe reads as a deterministic
+  identity), every object property and every datatype property with its range, not only
+  the relation vocabulary. `load` reads them back (`Class.source`, `DataProperty.range`,
+  descriptions). The DDL carries the product's `is_auto_generated` / `is_confirmed`
+  columns, so a table the library created accepts the product's upsert.
+- `XGEN_UPLOAD_HEADER_RE`: the retrieval preamble the XGEN document service prepends to
+  every chunk, exported for `header_patterns`; the library still strips nothing by itself.
+
+## Where the library differs from the product, on purpose (with 0.13's list)
+
+- `sameAs` folds the two names into one node; the product keeps two nodes and a `sameAs` edge.
+- Orphan classes are pruned to a fixpoint; the product prunes one round.
+- subClassOf cycles are broken; the product keeps both edges. Inherited properties are
+  materialized down the whole chain in one build; the product does one level per build.
+- An appending write unions a node's attribute values; the product keeps the last write's list.
+- A table row's label is never key-merged; the product merges table instances in a hybrid build.
+- A lost chunk (no answer came back) stays in the built set and only its relation pass is
+  asked again; the product re-extracts it as well.
+- The rebuild that keeps the previous graph until success is the store's transaction
+  (`write(replace=True)` in one transaction), not a library step.
+- `relation_count` and the ungoverned predicates of the quality review follow declarations;
+  the product reads them off schema edges, which exist only for properties with a domain
+  and a range.
+
 # 0.13.0 (2026-10-08)
 
 The build catches up with the production build (xgen-documents, develop): its relation

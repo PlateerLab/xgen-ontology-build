@@ -210,3 +210,74 @@ def test_community_of_partitions_the_instance_graph():
     assert comm and set(comm) <= {i.name for i in onto.instances}
     assert comm["한국마사회"] == comm["말산업연구소"]                      # linked by a row relation
     assert onto.communities()[0]["size"] >= 2
+
+
+# ───────────────────────── 0.14: the relation pass in groups (develop GROUP_SIZE) ─────────────────────────
+
+
+def test_enrich_runs_in_groups_and_a_grown_vocabulary_reaches_the_next_group():
+    import re
+
+    from test_postbuild import relation_model
+
+    log = []
+    base = relation_model({("한국마사회", "말산업연구소"): "manages", ("렛츠런재단", "사업팀"): "manages"},
+                          definitions={"hasDepartment": "has the department"}, log=log)
+
+    def llm(prompt, system=""):
+        if '"predicates"' in system and "Make the list" not in system:      # names missing from the vocabulary
+            log.append(("extend", prompt))
+            names = re.findall(r"^- ([A-Za-z]\w*):", prompt, re.M)
+            return json.dumps({"predicates": [{"name": n, "definition": f"{n}: defined from use"} for n in names]})
+        return base(prompt, system)
+
+    onto = OntologyBuilder(CallableLLM(llm), mode="enrich", chunk=False, group_size=1).build({"a.md": _T1, "b.md": _T2})
+    assert [k for k, _p in log] == ["vocabulary", "classify", "extend", "classify"]
+    # 'manages' was used outside the vocabulary in the first group, defined, and shown to the second
+    assert "- manages:" not in log[1][1] and "- manages:" in log[3][1]
+    stats = onto.report.relation_stats
+    assert stats["groups"] == 2 and stats["new_vocabulary"] == 2 and stats["calls"] == 2
+    assert ("렛츠런재단", "manages", "사업팀") in {(r.subject, r.predicate, r.object) for r in onto.relations}
+    assert onto.enriched_chunks == ["a.md#0", "b.md#0"]
+
+
+def test_a_stop_discards_the_group_under_way_and_keeps_the_groups_before():
+    from test_postbuild import relation_model
+
+    log = []
+    llm = relation_model({("한국마사회", "말산업연구소"): "hasDepartment", ("렛츠런재단", "사업팀"): "hasDepartment"},
+                         definitions={"hasDepartment": "has the department"}, log=log)
+    builder = OntologyBuilder(CallableLLM(llm), mode="enrich", chunk=False, group_size=1,
+                              should_stop=lambda: sum(1 for k, _p in log if k == "classify") >= 2)
+    onto = builder.build({"a.md": _T1, "b.md": _T2})
+    rel = {(r.subject, r.predicate, r.object) for r in onto.relations}
+    assert ("한국마사회", "hasDepartment", "말산업연구소") in rel           # the first group is kept
+    assert ("렛츠런재단", "hasDepartment", "사업팀") not in rel              # the second was under way: discarded
+    assert onto.enriched_chunks == ["a.md#0"]                              # and is asked again next time
+    assert onto.report.relation_stats["stopped"] is True and onto.report.relation_stats["groups"] == 1
+    assert any("stopped after 1 of 2" in n for n in onto.report.notes)
+
+
+def test_a_length_error_from_the_provider_counts_as_a_cut_off_answer():
+    from test_postbuild import relation_model
+
+    base = relation_model({("한국마사회", "말산업연구소"): "hasDepartment"},
+                          definitions={"hasDepartment": "has the department"})
+    sizes = []
+
+    class Provider:
+        def generate(self, prompt, *, system="", timeout=None):
+            return base(prompt, system)
+
+        def generate_json_meta(self, prompt, *, system="", schema=None, max_tokens=None, timeout=None):
+            if '"units_with_relations"' in system:
+                n = sum(1 for line in prompt.splitlines() if line.startswith("["))
+                sizes.append(n)
+                if n > 1:
+                    return "", {"length_error": True}                    # the provider refused the length
+            return base(prompt, system), {"truncated": False, "failed": False, "out_tokens": 0}
+
+    onto = OntologyBuilder(Provider(), mode="enrich", chunk=False, retry_backoff=0).build({"a.md": _T1})
+    assert sizes[0] == 3 and 1 in sizes                                    # halved down to single units
+    assert ("한국마사회", "hasDepartment", "말산업연구소") in {(r.subject, r.predicate, r.object) for r in onto.relations}
+    assert onto.enriched_chunks == ["a.md#0"]

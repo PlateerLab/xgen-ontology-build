@@ -55,7 +55,7 @@ from .relation_formation import (
 )
 from .resolve import resolve_entities
 from .retract import retract_chunks
-from .tabular import TABLE_EXTENSIONS, analyze_tables, build_from_tables
+from .tabular import TABLE_EXTENSIONS, analyze_tables, build_from_rows, build_from_tables, row_chunks
 from .taxonomy import (
     DEFAULT_RELATED_PREDICATE,
     fold_name_fragments,
@@ -76,7 +76,7 @@ class OntologyBuilder:
                  unit_scales: dict | None = None, dictionary: TermDictionary | None = None,
                  progress=None, relation_prompts: RelationPrompts = EN_RELATION_PROMPTS,
                  char_budget: int = 10000, max_output_tokens: int = 0, llm_timeout: float | None = None,
-                 max_workers: int = 1, retry_backoff: float = 5.0, should_stop=None):
+                 max_workers: int = 1, retry_backoff: float = 5.0, should_stop=None, group_size: int = 300):
         if mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
         self.llm = llm
@@ -108,6 +108,18 @@ class OntologyBuilder:
         self.max_workers = max_workers
         self.retry_backoff = retry_backoff
         self.should_stop = should_stop
+        # the relation pass works in groups of about this many chunks (documents kept whole):
+        # the vocabulary a group defines or grows is what the next group classifies against,
+        # and the next group's batches are planned with what the calls so far taught
+        self.group_size = max(1, int(group_size))
+
+    def _stopped(self) -> bool:
+        if self.should_stop is None:
+            return False
+        try:
+            return bool(self.should_stop())
+        except Exception:
+            return False
 
     def _relation_former(self) -> RelationFormer:
         return RelationFormer(
@@ -134,7 +146,7 @@ class OntologyBuilder:
                                                           size=self.chunk_size, overlap=self.chunk_overlap))
 
     def extend(self, ontology, documents: dict[str, list[dict]], *, rebuild: bool = False,
-               retract_missing: bool = False):
+               retract_missing: bool = False, doc_of: dict[str, str] | None = None):
         """Incremental build: extract only the chunks ``ontology`` has not seen, then re-run the post-build.
 
         Chunks are recognized by id, so pass the same ids the original build saw
@@ -149,7 +161,12 @@ class OntologyBuilder:
         chunks the ontology has that are not in it were deleted and are retracted
         before extraction (the store's ``baseline - snapshot`` delta), so the
         post-build runs over the current corpus. Leave it off when you pass only the
-        new documents. Returns the same ``ontology``.
+        new documents.
+
+        ``doc_of`` maps chunk ids to their documents for chunks the ontology holds
+        without one (a graph loaded from a store keeps chunk ids, not documents). The
+        spread of a head noun is measured over documents, so without it every such
+        chunk counts as a document of its own. Returns the same ``ontology``.
         """
         documents = _normalize_documents(documents, chunk=self.chunk, size=self.chunk_size,
                                          overlap=self.chunk_overlap)
@@ -161,9 +178,9 @@ class OntologyBuilder:
                                if c.id not in {ch["chunk_id"] for chs in documents.values() for ch in chs}]
             ontology.enriched_chunks = [c for c in ontology.enriched_chunks
                                         if c not in {ch["chunk_id"] for chs in documents.values() for ch in chs}]
-        return self._run(ontology, documents, incremental=True)
+        return self._run(ontology, documents, incremental=True, doc_of=doc_of)
 
-    def retract(self, ontology, chunk_ids):
+    def retract(self, ontology, chunk_ids, *, doc_of: dict[str, str] | None = None):
         """Take deleted chunks out of ``ontology`` and re-run the post-build over what is left.
 
         Nothing is extracted; the merge, hierarchy and normalization passes run so the
@@ -171,7 +188,34 @@ class OntologyBuilder:
         ``ontology.report.retracted``. Returns the same ``ontology``.
         """
         self._retract(ontology, chunk_ids)
-        return self._run(ontology, {}, incremental=True)
+        return self._run(ontology, {}, incremental=True, doc_of=doc_of)
+
+    def build_rows(self, table_name: str, columns: list[str], rows: list[dict], *, source_id: str, **schema):
+        """Build from the rows of one database table (a SELECT result); see :meth:`extend_rows`."""
+        from ..ontology import Ontology  # local import (Ontology imports build.*)
+
+        return self.extend_rows(Ontology(), table_name, columns, rows, source_id=source_id, **schema)
+
+    def extend_rows(self, ontology, table_name: str, columns: list[str], rows: list[dict], *, source_id: str,
+                    column_types: dict[str, str] | None = None, pk_candidates: list[str] | None = None,
+                    fk_relations: list[dict] | None = None, label_column: str | None = None):
+        """Load the rows of one database table into ``ontology`` and re-run the post-build.
+
+        The table's schema is declared, not inferred (:func:`~xgen_ontology.build.tabular.build_from_rows`).
+        Every row is a source of its own, ``"{source_id}:{pk}"``, kept as a chunk whose text is the
+        row's ``column: value`` lines; a row loaded before is replaced (its traces are retracted
+        first, so a changed attribute does not pile up next to the old one), and a row that left
+        the table is retracted with :meth:`retract` on its id. No LLM is called for rows. Returns
+        the same ``ontology``.
+        """
+        graph = build_from_rows(table_name, columns, rows, source_id=source_id, column_types=column_types,
+                                pk_candidates=pk_candidates, fk_relations=fk_relations, label_column=label_column)
+        chunks = row_chunks(table_name, columns, rows, source_id=source_id, pk_candidates=pk_candidates)
+        known = {c.id for c in ontology.chunks}
+        again = [ch["chunk_id"] for ch in chunks if ch["chunk_id"] in known]
+        if again:
+            self._retract(ontology, again)
+        return self._run(ontology, {source_id: chunks}, incremental=bool(known), rows_graph=graph)
 
     def _retract(self, onto, chunk_ids) -> dict:
         ids = {str(c) for c in (chunk_ids or []) if c}
@@ -189,7 +233,8 @@ class OntologyBuilder:
 
     # ── the pipeline ──
 
-    def _run(self, onto, documents: dict[str, list[dict]], *, incremental: bool = False):
+    def _run(self, onto, documents: dict[str, list[dict]], *, incremental: bool = False,
+             doc_of: dict[str, str] | None = None, rows_graph=None):
         concepts, instances, relations, data_values = (onto.concepts, onto.instances,
                                                        onto.relations, onto.data_values)
         report = onto.report if incremental else BuildReport()
@@ -202,17 +247,19 @@ class OntologyBuilder:
         new_docs = {n: [ch for ch in chs if ch["chunk_id"] not in known] for n, chs in documents.items()}
         new_docs = {n: chs for n, chs in new_docs.items() if chs}
         corpus_total = len(known | {ch["chunk_id"] for chs in documents.values() for ch in chs})
-        table_docs = {n: c for n, c in new_docs.items() if _ext(n) in TABLE_EXTENSIONS}
-        text_docs = {n: c for n, c in new_docs.items() if _ext(n) not in TABLE_EXTENSIONS}
+        # database rows arrive built (rows_graph); their chunks are sources, not text to extract
+        table_docs = {n: c for n, c in new_docs.items() if _ext(n) in TABLE_EXTENSIONS} if rows_graph is None else {}
+        text_docs = {n: c for n, c in new_docs.items() if _ext(n) not in TABLE_EXTENSIONS} if rows_graph is None else {}
         before = {c.name for c in concepts.classes} | {i.name for i in instances}
-        # Which document each chunk came from (this call's documents plus what earlier builds
-        # recorded on the chunks): the spread of a head noun is measured over documents.
-        doc_of = {c.id: c.meta["doc"] for c in onto.chunks if c.meta.get("doc")}
+        # Which document each chunk came from (what earlier builds recorded on the chunks, the
+        # caller's map for chunks that came without one, then this call's documents): the
+        # spread of a head noun is measured over documents.
+        doc_of = {**{c.id: c.meta["doc"] for c in onto.chunks if c.meta.get("doc")}, **(doc_of or {})}
         for name, chs in documents.items():
             for ch in chs:
                 doc_of[ch["chunk_id"]] = name
         corpus_docs = len(set(doc_of.values()))
-        if incremental and not new_docs and mode != "enrich":
+        if incremental and not new_docs and mode != "enrich" and rows_graph is None:
             report.notes.append("no new chunks: nothing to extract")
 
         self._tick("start", mode=mode, incremental=incremental, new_chunks=sum(len(v) for v in new_docs.values()),
@@ -227,6 +274,14 @@ class OntologyBuilder:
             relations += r
             data_values += dv
             protected = {cl.name for cl in c.classes if cl.name} | {x.name for x in i if x.name}
+        if rows_graph is not None:
+            c, i, r, dv = rows_graph
+            self._tick("tables", rows=len(i))
+            _merge(concepts, c)
+            instances += i
+            relations += r
+            data_values += dv
+            protected |= {cl.name for cl in c.classes if cl.name} | {x.name for x in i if x.name}
 
         if text_docs and mode in ("basic", "enrich"):
             self._tick("extract", documents=len(text_docs), chunks=sum(len(v) for v in text_docs.values()))
@@ -238,30 +293,53 @@ class OntologyBuilder:
             instances += i
             relations += r
             data_values += dv
-        if mode == "enrich":
+        stopped = False   # should_stop said so: nothing more goes to the model in this build
+        if mode == "enrich" and rows_graph is None:
             # the enrich baseline is "chunks whose relations were asked for", not "chunks built"
             done = set(onto.enriched_chunks)
             todo = {n: [ch for ch in chs if ch["chunk_id"] not in done] for n, chs in documents.items()
                     if _ext(n) not in TABLE_EXTENSIONS}
             todo = {n: chs for n, chs in todo.items() if chs}
             if todo:
-                self._tick("enrich", chunks=sum(len(v) for v in todo.values()))
+                groups = list(_split_into_groups(todo, self.group_size))
+                self._tick("enrich", chunks=sum(len(v) for v in todo.values()), groups=len(groups))
                 former = self._relation_former()
-                # The vocabulary is the declared relation names with their definitions; without
-                # one, the names already in use (without definitions); without those, the
-                # former defines one from the documents.
-                vocab = vocabulary_of(concepts) or [{"name": p, "definition": ""}
-                                                    for p in _known_predicates(relations)]
-                found, rstats = former.extract(todo, labels_by_chunk(concepts, instances),
-                                               vocabulary=vocab, domain=self.domain)
-                relations += found
-                _declare_relations(concepts, rstats.get("new_vocabulary") or [], found)
+                labels = labels_by_chunk(concepts, instances)
+                acc: dict = {"units": 0, "calls": 0, "prompt_chars": 0, "relations": 0, "empty_answers": 0,
+                             "vocabulary": 0, "new_vocabulary": 0, "groups": 0}
+                asked: set[str] = set()
+                for k, group in enumerate(groups, 1):
+                    if self._stopped():
+                        stopped = True
+                        break
+                    # The vocabulary is the declared relation names with their definitions, as the
+                    # groups before left them; without one, the names already in use (without
+                    # definitions); without those, the former defines one from this group.
+                    vocab = vocabulary_of(concepts) or [{"name": p, "definition": ""}
+                                                        for p in _known_predicates(relations)]
+                    self._tick("enrich", group=k, groups=len(groups), chunks=sum(len(v) for v in group.values()))
+                    found, rstats = former.extract(group, labels, vocabulary=vocab, domain=self.domain)
+                    if self._stopped():
+                        # stopped inside the group: nothing of it is kept, the next run asks it again
+                        stopped = True
+                        break
+                    relations += found
+                    new_vocab = rstats.get("new_vocabulary") or []
+                    _declare_relations(concepts, new_vocab, found)
+                    for key in ("units", "calls", "prompt_chars", "relations", "empty_answers"):
+                        acc[key] += int(rstats.get(key, 0) or 0)
+                    acc["vocabulary"] = int(rstats.get("vocabulary", acc["vocabulary"]) or 0)
+                    acc["new_vocabulary"] += len(new_vocab)
+                    acc["groups"] = k
+                    # a chunk no answer came back for is asked again next time
+                    asked |= {ch["chunk_id"] for chs in group.values() for ch in chs} - former.lost_chunk_ids
                 report.llm_calls += former.llm_calls
-                report.relation_stats = {k: v for k, v in rstats.items() if k != "new_vocabulary"}
-                report.relation_stats["new_vocabulary"] = len(rstats.get("new_vocabulary") or [])
-                report.relation_stats["lost_chunks"] = len(former.lost_chunk_ids)
-                # a chunk no answer came back for is asked again next time
-                asked = {ch["chunk_id"] for chs in todo.values() for ch in chs} - former.lost_chunk_ids
+                acc["lost_chunks"] = len(former.lost_chunk_ids)
+                if stopped:
+                    acc["stopped"] = True
+                    report.notes.append(f"stopped after {acc['groups']} of {len(groups)} relation group(s);"
+                                        " the group under way was discarded")
+                report.relation_stats = acc
                 onto.enriched_chunks = sorted(done | asked)
         if text_docs and mode == "llm":
             self._tick("llm", chunks=sum(len(v) for v in text_docs.values()))
@@ -283,9 +361,10 @@ class OntologyBuilder:
         deduper = Deduplicator(self.llm if mode == "enrich" else None, self.morphology, self.embedder)
         if self.dedup:
             self._tick("dedup", instances=len(instances), relations=len(relations))
-            # Key merge is for extracted names; a table row's label is its identity.
+            # Key merge is for extracted names, so it runs when text was extracted (the production
+            # build's rule); a table row's label is its identity and is never merged away.
             rename = {o: n for o, n in deduper._normalize_instances(instances).items()
-                      if o not in protected} if (text_docs or incremental) else {}
+                      if o not in protected} if text_docs else {}
             if rename:
                 Deduplicator._apply_instance(rename, instances, relations, data_values)
                 report.renamed += len(rename)
@@ -313,10 +392,14 @@ class OntologyBuilder:
                     f"{induced['retyped']} typing(s) under too common a head made neighbour links")
             report.renamed += induced["renamed"]
 
-        if self.dedup:
-            rename = deduper.compute_rename_map(concepts) if mode == "enrich" else {}
+        if self.dedup and text_docs:
+            # Class synonyms are judged when text was extracted (the production build's rule:
+            # a table-only build has no synonyms to find). Names the model folds are not
+            # offered to the vector pass again, so a name cannot be folded and be a cluster's
+            # canonical at once.
+            rename = deduper.compute_rename_map(concepts) if (mode == "enrich" and not stopped) else {}
             report.llm_calls += deduper.llm_calls
-            vmap = deduper._vector_dedup([c.name for c in concepts.classes if c.name])
+            vmap = deduper._vector_dedup([c.name for c in concepts.classes if c.name and c.name not in rename])
             rename = {**vmap, **rename}          # the LLM map wins on conflict
             rename = {o: n for o, n in rename.items() if o not in protected and o != n}
             if rename:
@@ -331,9 +414,9 @@ class OntologyBuilder:
         structural = (self.related_predicate,) if self.related_predicate else ()
         report.normalized = normalize_graph(concepts, instances, relations, data_values,
                                             structural_predicates=structural)
-        if mode == "enrich" and relations:
+        if mode == "enrich" and relations and not stopped:
             # Hold the relation names to the vocabulary (the production end-of-build step), then
-            # merge the triples that renaming made equal.
+            # merge the triples that renaming made equal. A stopped build leaves it to the next.
             canon_former = self._relation_former()
             canon = canonicalize_predicates(concepts, relations, canon_former)
             report.llm_calls += canon_former.llm_calls
@@ -343,7 +426,7 @@ class OntologyBuilder:
                     normalize_graph(concepts, instances, relations, data_values, structural_predicates=structural)
         clean_hierarchy(concepts)
 
-        onto.chunks = _extend_chunks(onto.chunks, documents, instances)
+        onto.chunks = _extend_chunks(onto.chunks, documents, instances, doc_of=doc_of)
 
         report.classes = len(concepts.classes)
         report.object_properties = len(concepts.object_properties)
@@ -522,9 +605,27 @@ def _merge(into: Concepts, new: Concepts) -> None:
             h.add(edge)
 
 
+def _split_into_groups(documents: dict[str, list[dict]], group_size: int):
+    """``documents`` in groups of about ``group_size`` chunks, a document never split between two
+    (the production build's groups)."""
+    buf: dict[str, list[dict]] = {}
+    count = 0
+    for name, chs in documents.items():
+        if not chs:
+            continue
+        buf[name] = chs
+        count += len(chs)
+        if count >= group_size:
+            yield buf
+            buf, count = {}, 0
+    if buf:
+        yield buf
+
+
 def _extend_chunks(existing: list[Chunk], documents: dict[str, list[dict]],
-                   instances: list[Instance]) -> list[Chunk]:
-    """The chunk list with ``documents`` added, entity mentions recomputed from ``instances``."""
+                   instances: list[Instance], *, doc_of: dict[str, str] | None = None) -> list[Chunk]:
+    """The chunk list with ``documents`` added, entity mentions recomputed from ``instances``; a
+    chunk that had no document takes the one ``doc_of`` names, so later builds remember it."""
     chunks: dict[str, Chunk] = {c.id: c for c in existing}
     for name, chs in documents.items():
         for ch in chs:
@@ -533,6 +634,8 @@ def _extend_chunks(existing: list[Chunk], documents: dict[str, list[dict]],
                 chunks[cid] = Chunk(id=cid, text=ch.get("chunk_text", ""), meta={"doc": name})
     for c in chunks.values():
         c.entities = []
+        if not c.meta.get("doc") and doc_of and doc_of.get(c.id):
+            c.meta["doc"] = doc_of[c.id]
     for inst in instances:
         for cid in inst.source_chunks or []:
             if cid in chunks and inst.name not in chunks[cid].entities:

@@ -33,6 +33,9 @@ class Ontology:
     chunks: list[Chunk] = field(default_factory=list)
     enriched_chunks: list[str] = field(default_factory=list)   # chunk ids the LLM relation pass covered
     translations: dict[str, str] = field(default_factory=dict)
+    # (kind, label) -> the URI a store keeps the node under (filled by PgGraph.load), so a node
+    # written back keeps its identity whatever its spelling would give now
+    uris: dict[tuple[str, str], str] = field(default_factory=dict)
     report: BuildReport = field(default_factory=BuildReport)
 
     # ── search ──

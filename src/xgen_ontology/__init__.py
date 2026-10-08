@@ -23,6 +23,7 @@ from .build.dedup import Deduplicator, cluster_by_cosine, shorten_entity_name
 from .build.deterministic import (
                                   MAX_COVERAGE,
                                   RELATED_PREDICATE,
+                                  XGEN_UPLOAD_HEADER_RE,
                                   extract_as_dicts,
                                   extract_chunk,
                                   extract_deterministic,
@@ -68,7 +69,17 @@ from .build.relation_formation import (
 from .build.relation_units import Unit, build_units, find_mentions, relation_label, units_for_documents
 from .build.resolve import resolve_entities
 from .build.retract import retract_chunks
-from .build.tabular import analyze_tables, build_from_tables, split_sheets, table_cell_rows
+from .build.tabular import (
+    analyze_tables,
+    build_from_rows,
+    build_from_tables,
+    normalize_fk_relations,
+    row_chunks,
+    split_sheets,
+    table_cell_rows,
+    value_text,
+    xsd_type_of,
+)
 from .build.taxonomy import (
                                   extract_hearst_pairs,
                                   fold_name_fragments,
@@ -83,6 +94,7 @@ from .build.translate import clean_korean_name, translate_names
 from .facade import (
                                   build_from_csv,
                                   build_from_csv_files,
+                                  build_from_db_rows,
                                   build_from_documents,
                                   build_from_files,
                                   build_from_text,
@@ -115,21 +127,23 @@ from .ontology import Ontology
 from .protocols import LLM, Embedder, GraphSink, GraphStore, Morphology, VectorStore
 from .text import BM25, safe_uri, tokenize
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 
 __all__ = [
     # portable knowledge exchange
     "build_knowledge", "export_knowledge", "build_resource_fragment", "assemble_resource_fragments",
     # facade
     "build_from_documents", "build_from_text", "build_from_files", "build_from_csv",
-    "build_from_csv_files", "build_from_triples", "rows_to_csv", "OntologyBuilder", "Ontology",
+    "build_from_csv_files", "build_from_db_rows", "build_from_triples", "rows_to_csv", "OntologyBuilder",
+    "Ontology",
     "unbuilt_chunks", "removed_chunks",
     # search
     "GraphRAG",
     # ingest
     "chunk_text", "chunk_document", "extract_text", "html_to_text", "load_documents",
     # build stages
-    "analyze_tables", "build_from_tables", "extract_deterministic", "extract_as_dicts",
+    "analyze_tables", "build_from_tables", "build_from_rows", "row_chunks", "normalize_fk_relations",
+    "value_text", "xsd_type_of", "XGEN_UPLOAD_HEADER_RE", "extract_deterministic", "extract_as_dicts",
     "extract_chunk", "is_value", "is_class_name", "is_common_word", "DocumentExtractor",
     "extraction_schema", "resolve_entities", "Deduplicator", "cluster_by_cosine",
     "shorten_entity_name", "govern_predicates", "normalize_predicate", "strip_argument_noun",

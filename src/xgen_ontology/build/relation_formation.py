@@ -739,10 +739,14 @@ def canonicalize_predicates(concepts: Concepts, relations: list[Relation], forme
                    key=lambda n: (-counts[n], n))
     if not names:
         return {}
-    examples: dict[str, list[tuple[str, str]]] = {}
+    # two examples per name: the best-evidenced statements first (the product reads them from
+    # the store by weight, then subject), so the model judges a name by how it is mostly used
+    by_name: dict[str, list[Relation]] = {}
     for r in relations:
-        if r.predicate in counts and len(examples.setdefault(r.predicate, [])) < 2:
-            examples[r.predicate].append((r.subject, r.object))
+        if r.predicate in counts:
+            by_name.setdefault(r.predicate, []).append(r)
+    examples = {n: [(r.subject, r.object) for r in sorted(rs, key=lambda r: (-(r.weight or 1.0), r.subject))[:2]]
+                for n, rs in by_name.items()}
     mapping = former.canonicalize_names({n: examples.get(n, []) for n in names}, vocab)
     unmatched = sorted(((n, counts[n]) for n in names if not mapping.get(n)), key=lambda kv: -kv[1])
     frequent = natural_cut(unmatched, min_k=1) if len(unmatched) > 1 else [n for n, _ in unmatched]

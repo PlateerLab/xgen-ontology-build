@@ -143,6 +143,7 @@ def test_incremental_write_supersedes_and_renames_the_old_neighbour_link():
 
 
 def test_the_relation_vocabulary_is_kept_in_the_schema_table():
+    from xgen_ontology import vocabulary_of
     from xgen_ontology.models import Concepts, ObjectProperty
 
     pg = _pg()
@@ -152,6 +153,64 @@ def test_the_relation_vocabulary_is_kept_in_the_schema_table():
     pg.write(onto)
     pg.write(onto, replace=False)                                     # written twice, kept once
     rows = pg._q("SELECT element_name, description FROM ontology_schema WHERE element_type='ObjectProperty'")
-    assert rows == [("hasDepartment", "the organization has the department")]
-    back = {op.name: op.description for op in pg.load().concepts.object_properties}
-    assert back == {"hasDepartment": "the organization has the department"}
+    # every declared relation name is a schema row (the product keeps them all); the vocabulary
+    # a model is shown is the identifiers among them
+    assert rows == [("hasDepartment", "the organization has the department"),
+                    ("담당", "not an identifier: not vocabulary")]
+    back = pg.load().concepts
+    assert {op.name: op.description for op in back.object_properties} == {
+        "hasDepartment": "the organization has the department", "담당": "not an identifier: not vocabulary"}
+    assert vocabulary_of(back) == [{"name": "hasDepartment", "definition": "the organization has the department"}]
+
+
+# ── 0.14: the store boundary (develop schema rows, URIs kept across load and write) ──
+
+
+def test_a_stored_node_keeps_its_uri_across_load_extend_and_append():
+    from xgen_ontology.models import Class, Concepts, Instance
+
+    pg = _pg()
+    # a node the product stored under a URI the name would not give now (a promoted head)
+    onto = Ontology(concepts=Concepts(classes=[Class(name="기관")]),
+                    instances=[Instance(name="한국마사회", class_name="기관", source_chunks=["c1"])],
+                    uris={("concept", "기관"): "https://w3id.org/xgen-instance#기관"})
+    pg.write(onto)
+    back = pg.load()
+    assert back.uris[("concept", "기관")] == "https://w3id.org/xgen-instance#기관"
+    back.instances.append(Instance(name="렛츠런재단", class_name="기관", source_chunks=["c2"]))
+    pg.write(back, replace=False)
+    rows = pg._q("SELECT uri FROM ontology_nodes WHERE kind='concept' AND label='기관'")
+    assert rows == [("https://w3id.org/xgen-instance#기관",)]               # one row, the stored URI
+    assert pg.counts()["concept"] == 1 and {n.label for n in pg.class_instances("기관")} == {"한국마사회", "렛츠런재단"}
+    # a fresh build appended to the store finds the rows as they are: no second node for a known name
+    fresh = Ontology(concepts=Concepts(classes=[Class(name="기관")]),
+                     instances=[Instance(name="서울경마공원", class_name="기관", source_chunks=["c3"])])
+    pg.write(fresh, replace=False)
+    assert pg.counts()["concept"] == 1 and pg.count_class("기관") == 3
+
+
+def test_a_head_promoted_to_a_class_keeps_the_instance_uri_and_changes_kind():
+    from xgen_ontology.models import Class, Concepts, Instance
+
+    pg = _pg()
+    pg.write(Ontology(instances=[Instance(name="감사실", source_chunks=["c1"])]))
+    (uri,) = pg._q("SELECT uri FROM ontology_nodes WHERE label='감사실'")[0]
+    pg.write(Ontology(concepts=Concepts(classes=[Class(name="감사실")]),
+                      instances=[Instance(name="상임감사실", class_name="감사실", source_chunks=["c2"])]), replace=False)
+    assert pg._q("SELECT uri, kind FROM ontology_nodes WHERE label='감사실'") == [(uri, "concept")]
+
+
+def test_the_whole_schema_is_kept_in_the_schema_table():
+    from xgen_ontology import build_from_csv
+
+    pg = _pg()
+    onto = build_from_csv({"colors": "color_id,name,price\n10,Red,1.5\n20,Blue,2.0"})
+    pg.write(onto)
+    rows = {(t, n): (src, rng) for t, n, src, rng in pg._q(
+        "SELECT element_type, element_name, source, range_value FROM ontology_schema ORDER BY id")}
+    assert rows[("Class", "Colors")] == ("csv", None)                       # a table's class, marked as the product marks it
+    assert rows[("DatatypeProperty", "price")] == (None, "xsd:decimal")
+    back = pg.load()
+    assert next(c for c in back.concepts.classes if c.name == "Colors").source == "table"
+    assert next(d for d in back.concepts.datatype_properties if d.name == "price").range == "xsd:decimal"
+    assert pg._q("SELECT is_auto_generated, is_confirmed FROM ontology_schema LIMIT 1") == [(1, 0)]

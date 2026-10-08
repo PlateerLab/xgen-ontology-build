@@ -77,7 +77,9 @@ def invoke_json_meta(llm: Any, system: str, user: str, *, schema: dict | None = 
     unknown). An LLM may expose ``generate_json_meta(prompt, system=, schema=,
     max_tokens=, timeout=)`` returning ``(dict | str, meta)`` to report these exactly
     (its provider knows the finish reason and the token count); otherwise they are read
-    off the reply, which is what any model gives.
+    off the reply, which is what any model gives. A provider that refuses the length
+    outright may report ``length_error`` instead: that counts as cut off too, so the
+    caller shrinks its request the way it does for a truncated answer.
     """
     meta = {"truncated": False, "failed": False, "out_tokens": 0}
     if llm is None:
@@ -88,6 +90,8 @@ def invoke_json_meta(llm: Any, system: str, user: str, *, schema: dict | None = 
             raw, given = llm.generate_json_meta(user, system=system, schema=schema, max_tokens=max_tokens,
                                                 timeout=timeout)
             meta.update({k: v for k, v in (given or {}).items() if k in meta})
+            if (given or {}).get("length_error"):
+                meta["truncated"] = True
         elif schema is not None and hasattr(llm, "generate_json"):
             raw = llm.generate_json(user, system=system, schema=schema)
         else:

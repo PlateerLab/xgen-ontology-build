@@ -9,12 +9,20 @@ Two stages, both domain-general:
    rule: table -> Class, FK -> ObjectProperty, column -> DataProperty, dimension
    rows -> instances. Fact / event tables (FK-source-only or junctions, when large)
    are kept as schema only (their rows belong in a SQL store, not the graph).
+
+``build_from_rows`` is the same build for the rows of one database table (a SELECT
+result): the schema is declared by the caller (primary key, label column, column
+types, foreign keys) instead of inferred, every row carries its own source id, and a
+value's type comes from its Python type.
 """
 from __future__ import annotations
 
 import csv
+import json
 import re
 from collections import Counter, defaultdict
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from ..korean import normalize_text
@@ -24,6 +32,57 @@ from .deterministic import _CELL_TAG, _META, _ROW, _SPAN, _clean, is_value, pars
 
 TABLE_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xlsm", ".xls"}
 _REF_TABLE_MAX_ROWS = 200  # at/below this a table is treated as a dimension (instantiated)
+
+# A database value's Python type -> xsd type; subclasses first (bool < int, datetime < date).
+_PY_TO_XSD: tuple[tuple[type, str], ...] = (
+    (bool, "xsd:boolean"),
+    (int, "xsd:integer"),
+    (Decimal, "xsd:decimal"),
+    (float, "xsd:decimal"),
+    (datetime, "xsd:dateTime"),
+    (date, "xsd:date"),
+)
+
+
+def xsd_type_of(value: Any) -> str:
+    """The xsd type of a Python value (``xsd:string`` for anything else)."""
+    for py_type, xsd in _PY_TO_XSD:
+        if isinstance(value, py_type):
+            return xsd
+    return "xsd:string"
+
+
+def value_text(value: Any) -> str:
+    """A database value as a graph literal: ``None`` is empty (not recorded), booleans are
+    ``true`` / ``false``, dates are ISO 8601, bytes are decoded, JSON columns are JSON."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _infer_types_from_values(columns: list[str], rows: list[dict[str, Any]]) -> dict[str, str]:
+    """A column's xsd type from the Python type of its first recorded value."""
+    types: dict[str, str] = {}
+    for col in columns:
+        for row in rows:
+            v = row.get(col)
+            if v is not None and v != "":
+                types[col] = xsd_type_of(v)
+                break
+        else:
+            types[col] = "xsd:string"
+    return types
 
 
 # ───────────────────────── schema inference ─────────────────────────
@@ -85,7 +144,104 @@ def build_from_tables(
     # One table per sheet, keyed the way analyze_tables keyed them.
     documents = {key: chunks for file_name, file_chunks in documents.items()
                  for key, chunks in split_sheets(file_name, file_chunks, header_patterns).items()}
+    table_rows: dict[str, list[dict[str, str]]] = {}
+    row_sources: dict[str, list[list[str]]] = {}
+    for fn, chunks in documents.items():
+        t = tables.get(fn)
+        if t:
+            table_rows[fn], row_sources[fn] = _rows_from_chunks(chunks, t.get("columns", []))
+    return _build_graph(tables, fk_relations, table_rows, row_sources)
 
+
+def build_from_rows(
+    table_name: str,
+    columns: list[str],
+    rows: list[dict[str, Any]],
+    *,
+    source_id: str,
+    column_types: dict[str, str] | None = None,
+    pk_candidates: list[str] | None = None,
+    fk_relations: list[dict] | None = None,
+    label_column: str | None = None,
+) -> tuple[Concepts, list[Instance], list[Relation], list[DataValue]]:
+    """The rows of one database table (a SELECT result) -> ontology, no LLM.
+
+    The schema is declared, not inferred: ``pk_candidates`` (the first is the key),
+    ``label_column`` (the column that names a row; judged from the data when absent),
+    ``column_types`` (xsd types; else the Python type of each column's first recorded value)
+    and ``fk_relations`` (``{"from_column", "to_table", "to_column", "to_pk_column"}``, each
+    checked by :func:`normalize_fk_relations`). Values are rendered by :func:`value_text`.
+    Every row is its own source: ``"{source_id}:{pk}"`` (``"{source_id}:row{i}"`` without a
+    key), so a row can later be retracted on its own. A single table is never a fact table
+    here, and a foreign-key cell that is SQL NULL makes no relation while an empty string
+    still points at ``"{to_table}_"``, as the production loader does.
+    """
+    columns = [str(c) for c in columns]
+    if not columns or not rows:
+        return Concepts(), [], [], []
+    text_rows = [{c: value_text(r.get(c)) for c in columns} for r in rows]
+    null_cells = {(table_name, i, c) for i, r in enumerate(rows) for c in columns if r.get(c) is None}
+    types = dict(column_types) if column_types else _infer_types_from_values(columns, rows)
+    pks = [str(p) for p in (pk_candidates or []) if p]
+    table = {"table_name": table_name, "columns": columns, "column_types": types, "pk_candidates": pks,
+             "label_column": label_column, "row_count_estimate": len(text_rows)}
+    sources = {table_name: row_source_ids(source_id, text_rows, pks[0] if pks else None)}
+    return _build_graph({table_name: table}, normalize_fk_relations(fk_relations, table_name, columns),
+                        {table_name: text_rows}, sources, skip_fact_tables=False, null_cells=null_cells)
+
+
+def normalize_fk_relations(fk_relations: list[dict] | None, table_name: str, columns: list[str]) -> list[dict]:
+    """Check the foreign keys declared for one table's rows: each names ``from_column`` (a column
+    of the rows), ``to_table``, ``to_column`` and ``to_pk_column`` (the same column: a key
+    points at the target's primary key); ``from_table`` defaults to the table."""
+    out: list[dict] = []
+    for i, fk in enumerate(fk_relations or []):
+        rel = {**fk}
+        rel.setdefault("from_table", table_name)
+        missing = [k for k in ("from_column", "to_table", "to_column", "to_pk_column") if not rel.get(k)]
+        if missing:
+            raise ValueError(f"fk_relations[{i}] lacks {', '.join(missing)}")
+        if rel["from_table"] != table_name:
+            raise ValueError(f"fk_relations[{i}].from_table must be the loaded table {table_name!r}")
+        if rel["from_column"] not in columns:
+            raise ValueError(f"fk_relations[{i}].from_column {rel['from_column']!r} is not a column of the rows")
+        if rel["to_column"] != rel["to_pk_column"]:
+            raise ValueError(f"fk_relations[{i}].to_column must be the target's primary key column (to_pk_column)")
+        out.append(rel)
+    return out
+
+
+def row_source_ids(source_id: str, rows: list[dict[str, str]], pk_col: str | None) -> list[list[str]]:
+    """One stable source id per row: the key's value, or the row number when there is no key."""
+    if pk_col is None:
+        return [[f"{source_id}:row{i}"] for i in range(len(rows))]
+    return [[f"{source_id}:{row.get(pk_col, '')}"] for row in rows]
+
+
+def row_chunks(table_name: str, columns: list[str], rows: list[dict[str, Any]], *, source_id: str,
+               pk_candidates: list[str] | None = None) -> list[dict]:
+    """The rows as chunks for the build's bookkeeping: each row under its source id
+    (:func:`row_source_ids`, the ids :func:`build_from_rows` gives) with its ``column: value``
+    lines as text, so a row is searched and retracted like any chunk."""
+    del table_name
+    columns = [str(c) for c in columns]
+    text_rows = [{c: value_text(r.get(c)) for c in columns} for r in rows]
+    pks = [str(p) for p in (pk_candidates or []) if p]
+    ids = row_source_ids(source_id, text_rows, pks[0] if pks else None)
+    return [{"chunk_id": ids[i][0], "chunk_text": "\n".join(f"{c}: {v}" for c, v in row.items() if v),
+             "chunk_index": i} for i, row in enumerate(text_rows)]
+
+
+def _build_graph(
+    tables: dict[str, dict[str, Any]],
+    fk_relations: list[dict],
+    table_rows: dict[str, list[dict[str, str]]],
+    row_sources: dict[str, list[list[str]]],
+    *,
+    skip_fact_tables: bool = True,
+    null_cells: set | None = None,
+) -> tuple[Concepts, list[Instance], list[Relation], list[DataValue]]:
+    """Table schemas + their text rows (with each row's source ids) -> ontology."""
     table_class = {t.get("table_name", fn): _camel(t.get("table_name", fn)) for fn, t in tables.items()}
 
     classes = [
@@ -146,24 +302,20 @@ def build_from_tables(
         fk_col_count[fk["from_table"]] += 1
 
     def _is_fact(raw: str, n_rows: int) -> bool:
-        if n_rows <= _REF_TABLE_MAX_ROWS:
+        if not skip_fact_tables or n_rows <= _REF_TABLE_MAX_ROWS:
             return False
         return raw in fk_source_only or fk_col_count.get(raw, 0) >= 2
 
     # Pass 1: rows, one instance label per row (duplicates split by identity), PK -> label.
     # A table with no name column gets no instances: naming rows by their PK turns numbers
     # into entities. Fact tables get none either.
-    table_rows: dict[str, list[dict[str, str]]] = {}
-    row_chunks: dict[str, list[list[str]]] = {}
     table_labels: dict[str, list[str]] = {}
     pk_lookup: dict[str, dict[str, str]] = defaultdict(dict)
-    for fn, chunks in documents.items():
+    for fn, rows in table_rows.items():
         t = tables.get(fn)
         if not t:
             continue
-        raw = t["table_name"]
-        rows, src = _rows_from_chunks(chunks, t.get("columns", []))
-        table_rows[fn], row_chunks[fn] = rows, src
+        raw = t.get("table_name", fn)
         if _is_fact(raw, len(rows)):
             continue
         label_col = _label_col(t, rows)
@@ -182,18 +334,17 @@ def build_from_tables(
             pk_lookup[raw].setdefault(pk_val.strip(), labels[i])
 
     # Pass 2: instances + data values + FK relations (resolved through the lookup).
-    for fn in documents:
+    for fn, rows in table_rows.items():
         t = tables.get(fn)
         if not t or fn not in table_labels:
             continue
-        raw = t["table_name"]
+        raw = t.get("table_name", fn)
         cls_name = table_class[raw]
         pk_col = table_pk.get(raw)
-        rows = table_rows.get(fn, [])
         label_col = _label_col(t, rows)
         fk_cols = {fc for fc, _, _ in fk_index.get(raw, [])}
         labels = table_labels[fn]
-        src = row_chunks.get(fn, [])
+        src = row_sources.get(fn, [])
         for i, row in enumerate(rows):
             name = labels[i]
             chunk_ids = src[i] if i < len(src) else []
@@ -210,7 +361,12 @@ def build_from_tables(
             for from_col, to_table, _to_col in fk_index.get(raw, []):
                 fk_raw = row.get(from_col, "")
                 fk_val = fk_raw.strip()
-                if not fk_val:
+                # Rows from a database say which cells were NULL: only those make no relation.
+                # Rows from text have no NULL, so a blank cell is one.
+                if null_cells is not None:
+                    if (fn, i, from_col) in null_cells:
+                        continue
+                elif not fk_val:
                     continue
                 to_cls = table_class.get(to_table, _camel(to_table))
                 prop = f"{cls_name}_{from_col}"

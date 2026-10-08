@@ -3,11 +3,16 @@
 Four weighted dimensions (knowledge-graph usefulness order):
 
 * **completeness** (0.40) — fraction of classes that actually have instances.
-* **integrity**    (0.25) — no dangling edges (references to non-existent nodes).
-* **grounding**    (0.20) — relations whose endpoints co-occur in a source chunk
-  (cheap anti-hallucination check; skipped/full marks when no source markers).
+* **integrity**    (0.25) — no dangling edges (an end that is not a node).
+* **grounding**    (0.20) — relations that state their source chunks or whose endpoints
+  co-occur in one (cheap anti-hallucination check; skipped/full marks when no markers).
 * **shape**        (0.15) — SHACL-like hygiene: untyped instances, ungoverned
   predicates, domain violations (penalized by *ratio*, not raw count).
+
+Also counted, not scored: ``orphan_class_count`` (classes nothing instantiates and no
+object property declares), the production review's first warning. ``relation_count`` and
+the ungoverned predicates are judged by declaration here; the production review reads
+them off schema edges, which exist only for properties with a domain and a range.
 
 All in-memory over the build models — no SPARQL, no infra.
 """
@@ -48,8 +53,13 @@ def review_quality(
 
     obj_rels = [r for r in relations if r.predicate_type != "DatatypeProperty"]
     nodes = inst_names | class_names
-    dangling = sum(1 for r in obj_rels if r.object and r.object not in nodes)
+    dangling = sum(1 for r in obj_rels if (r.subject and r.subject not in nodes) or (r.object and r.object not in nodes))
     integrity_ok = dangling == 0
+    # a class nothing instantiates and no object property declares a domain or range of
+    # (the production review's first warning)
+    op_ends = ({op.domain for op in concepts.object_properties if op.domain}
+               | {op.range for op in concepts.object_properties if op.range})
+    orphan_classes = sum(1 for c in class_names if c not in classes_with_instances and c not in op_ends)
 
     # shape
     untyped = sum(1 for i in instances if i.name and (not i.class_name or i.class_name not in class_names))
@@ -64,14 +74,15 @@ def review_quality(
             domain_violation += 1
     shape_ok = (untyped + ungoverned + domain_violation) == 0
 
-    # grounding (co-occurrence in a source chunk)
+    # grounding: the relation states its own chunks, or its two ends share one (the stored
+    # graph links a relation's chunks to both ends, so a stated relation is grounded there)
     chunk_of: dict[str, set] = {i.name: set(i.source_chunks or []) for i in instances if i.name}
-    has_markers = any(chunk_of.get(n) for n in inst_names)
+    has_markers = any(chunk_of.get(n) for n in inst_names) or any(r.source_chunks for r in obj_rels)
     total_inst_relations = sum(1 for r in obj_rels if r.subject in inst_names and r.object in inst_names)
     if total_inst_relations and has_markers:
         ungrounded = sum(
             1 for r in obj_rels
-            if r.subject in inst_names and r.object in inst_names
+            if r.subject in inst_names and r.object in inst_names and not r.source_chunks
             and not (chunk_of.get(r.subject, set()) & chunk_of.get(r.object, set()))
         )
         grounding_pct = round(100.0 * (total_inst_relations - ungrounded) / total_inst_relations, 1)
@@ -109,12 +120,15 @@ def review_quality(
         warnings.append(f"{domain_violation} domain violation(s)")
     if total_inst_relations and grounding_pct < WARN_GROUNDING_PCT:
         warnings.append(f"weak grounding: only {grounding_pct}% of relations co-occur in source")
+    if orphan_classes:
+        warnings.append(f"{orphan_classes} orphan class(es)")
 
     return {
         "class_count": class_count,
         "instance_count": instance_count,
         "relation_count": relation_count,
         "classes_without_instance": classes_without_instance,
+        "orphan_class_count": orphan_classes,
         "completeness_pct": completeness_pct,
         "dangling_edge_count": dangling,
         "integrity_ok": integrity_ok,

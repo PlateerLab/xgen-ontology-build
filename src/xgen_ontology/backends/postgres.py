@@ -23,7 +23,6 @@ import json
 from typing import Any
 
 from ..build.finalize import LEGACY_RELATED_PREDICATE
-from ..build.relation_formation import vocab_name
 from ..build.taxonomy import DEFAULT_RELATED_PREDICATE
 from ..korean import normalize_label
 from ..models import Chunk, Class, Concepts, DataProperty, DataValue, Instance, Node, ObjectProperty, Relation
@@ -61,7 +60,10 @@ _DDL = {
         "CREATE INDEX IF NOT EXISTS ix_oes_coll_source ON ontology_edge_sources (collection_id, source_id)",
         "CREATE TABLE IF NOT EXISTS ontology_schema (id SERIAL PRIMARY KEY, collection_id VARCHAR(255) NOT NULL,"
         " element_name VARCHAR(500) NOT NULL, element_type VARCHAR(50) NOT NULL, description TEXT,"
-        " domain_class VARCHAR(500), range_value VARCHAR(500), parent_class VARCHAR(500), source VARCHAR(20))",
+        " domain_class VARCHAR(500), range_value VARCHAR(500), parent_class VARCHAR(500), source VARCHAR(20),"
+        " is_auto_generated BOOLEAN DEFAULT TRUE, is_confirmed BOOLEAN DEFAULT FALSE)",
+        "ALTER TABLE ontology_schema ADD COLUMN IF NOT EXISTS is_auto_generated BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE ontology_schema ADD COLUMN IF NOT EXISTS is_confirmed BOOLEAN DEFAULT FALSE",
     ],
     "sqlite": [
         "CREATE TABLE IF NOT EXISTS ontology_nodes (id INTEGER PRIMARY KEY, collection_id TEXT NOT NULL,"
@@ -75,7 +77,8 @@ _DDL = {
         " UNIQUE (collection_id, subject_uri, predicate, object_uri, source_type, source_id))",
         "CREATE TABLE IF NOT EXISTS ontology_schema (id INTEGER PRIMARY KEY, collection_id TEXT NOT NULL,"
         " element_name TEXT NOT NULL, element_type TEXT NOT NULL, description TEXT, domain_class TEXT,"
-        " range_value TEXT, parent_class TEXT, source TEXT)",
+        " range_value TEXT, parent_class TEXT, source TEXT, is_auto_generated INTEGER DEFAULT 1,"
+        " is_confirmed INTEGER DEFAULT 0)",
         "CREATE TABLE IF NOT EXISTS ontology_node_chunks (id INTEGER PRIMARY KEY, collection_id TEXT NOT NULL,"
         " uri TEXT NOT NULL, chunk_id TEXT NOT NULL, UNIQUE (collection_id, uri, chunk_id))",
         "CREATE TABLE IF NOT EXISTS ontology_enriched_chunks (id INTEGER PRIMARY KEY, collection_id TEXT NOT NULL,"
@@ -100,7 +103,29 @@ def instance_uri(name: str) -> str:
     return INSTANCE_NS + stable_local(normalize_label(name))
 
 
-def graph_rows(ontology, *, translations: dict[str, str] | None = None
+def _uri_fns(ontology, uris: dict | None = None):
+    """URI makers for an ontology's nodes: a node the store already holds keeps its URI
+    (``ontology.uris`` and ``uris``, ``(kind, label) -> uri``), a head promoted to a class keeps
+    the instance URI it was stored under (the product's promotion changes the kind, not the
+    URI), and only a node the store has not seen gets a URI from its name."""
+    known: dict = dict(getattr(ontology, "uris", None) or {})
+    if uris:
+        known.update(uris)
+    inst_names = {i.name for i in ontology.instances if i.name}
+
+    def cu(name: str) -> str:
+        u = known.get(("concept", name))
+        if u is None and name not in inst_names:
+            u = known.get(("instance", name))
+        return u or class_uri(name)
+
+    def iu(name: str) -> str:
+        return known.get(("instance", name)) or instance_uri(name)
+
+    return cu, iu
+
+
+def graph_rows(ontology, *, translations: dict[str, str] | None = None, uris: dict | None = None
                ) -> tuple[list[tuple], list[tuple], list[tuple[str, str]]]:
     """An ontology as the store's rows: ``(nodes, edges, node_chunks)``.
 
@@ -111,13 +136,16 @@ def graph_rows(ontology, *, translations: dict[str, str] | None = None
     the production ``serialize_graph`` produces from an equivalent build. The chunks
     each relation was stated in are :func:`edge_source_rows`.
 
-    A predicate IRI is the predicate itself: relation names are English identifiers
+    A node keeps the URI a store holds it under (``ontology.uris``, filled by
+    :meth:`PgGraph.load`, and ``uris``); a node the store has not seen gets one from its
+    name. A predicate IRI is the predicate itself: relation names are English identifiers
     (``normalize_graph``). ``translations`` is accepted for compatibility and not used
     here; :meth:`Ontology.translate <xgen_ontology.Ontology.translate>` still names the
     RDF export.
     """
     del translations
     c = ontology.concepts
+    cu, iu = _uri_fns(ontology, uris)
 
     def pred_uri(name: str) -> str:
         return DOMAIN_NS + name
@@ -129,47 +157,47 @@ def graph_rows(ontology, *, translations: dict[str, str] | None = None
     for cl in c.classes:
         if not cl.name:
             continue
-        nodes.append((class_uri(cl.name), "concept", cl.name, None))
-        chunks += [(class_uri(cl.name), cid) for cid in cl.source_chunks if cid]
+        nodes.append((cu(cl.name), "concept", cl.name, None))
+        chunks += [(cu(cl.name), cid) for cid in cl.source_chunks if cid]
     for dp in c.datatype_properties:
         if not dp.name:
             continue
         puri = DOMAIN_NS + (f"{dp.domain}_{dp.name}" if dp.domain else dp.name)
         nodes.append((puri, "property", dp.name, None))
         if dp.domain and dp.domain in class_names:
-            edges.append((class_uri(dp.domain), dp.name, puri, pred_uri(dp.name), "datatypeProperty_schema", 1.0,
+            edges.append((cu(dp.domain), dp.name, puri, pred_uri(dp.name), "datatypeProperty_schema", 1.0,
                           None))
     for op in c.object_properties:
         if op.name and op.domain in class_names and op.range in class_names:
-            edges.append((class_uri(op.domain), op.name, class_uri(op.range), pred_uri(op.name),
+            edges.append((cu(op.domain), op.name, cu(op.range), pred_uri(op.name),
                           "objectProperty_schema", 1.0, None))
     for parent, child in c.class_hierarchy:
         if parent in class_names and child in class_names and parent != child:
-            edges.append((class_uri(child), "subClassOf", class_uri(parent), DOMAIN_NS + "subClassOf",
+            edges.append((cu(child), "subClassOf", cu(parent), DOMAIN_NS + "subClassOf",
                           "subClassOf", 1.0, None))
 
     inst_names: set[str] = set()
     for i in ontology.instances:
         if not i.name:
             continue
-        u = instance_uri(i.name)
+        u = iu(i.name)
         if i.name not in inst_names:
             nodes.append((u, "instance", i.name, None))
             inst_names.add(i.name)
         if i.class_name and i.class_name in class_names:
-            edges.append((u, "instanceOf", class_uri(i.class_name), DOMAIN_NS + "instanceOf", "instanceOf", 1.0,
+            edges.append((u, "instanceOf", cu(i.class_name), DOMAIN_NS + "instanceOf", "instanceOf", 1.0,
                           None))
         chunks += [(u, cid) for cid in i.source_chunks if cid]
 
     def endpoint(name: str) -> str:
-        return instance_uri(name) if name in inst_names or name not in class_names else class_uri(name)
+        return iu(name) if name in inst_names or name not in class_names else cu(name)
 
     for r in ontology.relations:
         if not (r.subject and r.predicate and r.object) or r.predicate_type == "DatatypeProperty":
             continue
         for end in (r.subject, r.object):
             if end not in inst_names and end not in class_names:
-                nodes.append((instance_uri(end), "instance", end, None))
+                nodes.append((iu(end), "instance", end, None))
                 inst_names.add(end)
         edges.append((endpoint(r.subject), r.predicate, endpoint(r.object), pred_uri(r.predicate),
                       "objectProperty", float(r.weight or 1.0), r.label or None))
@@ -181,7 +209,7 @@ def graph_rows(ontology, *, translations: dict[str, str] | None = None
         if not (d.entity and d.property) or d.value is None:
             continue
         if d.entity not in inst_names and d.entity not in class_names:
-            nodes.append((instance_uri(d.entity), "instance", d.entity, None))
+            nodes.append((iu(d.entity), "instance", d.entity, None))
             inst_names.add(d.entity)
         u = endpoint(d.entity)
         vals = attrs.setdefault(u, {}).setdefault(str(d.property), [])
@@ -206,14 +234,15 @@ def graph_rows(ontology, *, translations: dict[str, str] | None = None
     return uniq_nodes, uniq_edges, sorted(set(chunks))
 
 
-def edge_source_rows(ontology) -> list[tuple[str, str, str, str]]:
+def edge_source_rows(ontology, *, uris: dict | None = None) -> list[tuple[str, str, str, str]]:
     """The chunks each relation was stated in, as the store keeps them: ``(subject_uri, predicate,
     object_uri, chunk_id)``. Same endpoints as :func:`graph_rows`."""
     class_names = {cl.name for cl in ontology.concepts.classes if cl.name}
     inst_names = {i.name for i in ontology.instances if i.name}
+    cu, iu = _uri_fns(ontology, uris)
 
     def endpoint(name: str) -> str:
-        return instance_uri(name) if name in inst_names or name not in class_names else class_uri(name)
+        return iu(name) if name in inst_names or name not in class_names else cu(name)
 
     out: set[tuple[str, str, str, str]] = set()
     for r in ontology.relations:
@@ -271,8 +300,14 @@ class PgGraph:
         earlier version get the edge ``label`` column and the relation-sources table."""
         for ddl in _DDL[self.dialect]:
             self._x(ddl)
-        if self.dialect == "sqlite" and "label" not in {r[1] for r in self._q("PRAGMA table_info(ontology_edges)")}:
-            self._x("ALTER TABLE ontology_edges ADD COLUMN label TEXT")
+        if self.dialect == "sqlite":
+            if "label" not in {r[1] for r in self._q("PRAGMA table_info(ontology_edges)")}:
+                self._x("ALTER TABLE ontology_edges ADD COLUMN label TEXT")
+            schema_cols = {r[1] for r in self._q("PRAGMA table_info(ontology_schema)")}
+            if "is_auto_generated" not in schema_cols:
+                self._x("ALTER TABLE ontology_schema ADD COLUMN is_auto_generated INTEGER DEFAULT 1")
+            if "is_confirmed" not in schema_cols:
+                self._x("ALTER TABLE ontology_schema ADD COLUMN is_confirmed INTEGER DEFAULT 0")
 
     # ── sink ──
 
@@ -283,20 +318,26 @@ class PgGraph:
         ``ontology`` is the whole graph (an incremental build extends a loaded one), so an edge
         seen again takes the model's weight, not one more, and keeps its first label. Relations a
         named relation superseded (``normalize_graph``) leave the table too, and links still under
-        the former neighbour name (``관련``) are renamed to the current one.
+        the former neighbour name (``관련``) are renamed to the current one. A node the store
+        already holds keeps its URI (``ontology.uris`` from :meth:`load`, and on an appending
+        write the rows as they are now), so a name whose kind or spelling the build changed is
+        the same row, not a second one.
         """
         del translations
-        nodes, edges, chunks = graph_rows(ontology)
-        sources = edge_source_rows(ontology)
+        known_uris = dict(getattr(ontology, "uris", None) or {})
+        if not replace:
+            known_uris.update(self.label_uris())
+        nodes, edges, chunks = graph_rows(ontology, uris=known_uris)
+        sources = edge_source_rows(ontology, uris=known_uris)
         C = self.collection_id
         if replace:
             self.clear()
             merged = {u: a for u, _k, _l, a in nodes if a}
         else:
             merged = {}
-            uris = [u for u, _k, _l, a in nodes if a]
-            for i in range(0, len(uris), 500):
-                part = uris[i:i + 500]
+            with_attrs = [u for u, _k, _l, a in nodes if a]
+            for i in range(0, len(with_attrs), 500):
+                part = with_attrs[i:i + 500]
                 rows = self._q("SELECT uri, attrs FROM ontology_nodes WHERE collection_id=? AND uri IN ("
                                + ",".join(["?"] * len(part)) + ")", (C, *part))
                 for u, a in rows:
@@ -310,8 +351,8 @@ class PgGraph:
         self._insert("INSERT INTO ontology_nodes(collection_id, uri, kind, label, attrs)", 5,
                      [(C, u, k, lb, json.dumps(merged.get(u), ensure_ascii=False) if merged.get(u) else None)
                       for u, k, lb, _a in nodes],
-                     "ON CONFLICT (collection_id, uri) DO UPDATE SET attrs = COALESCE(excluded.attrs, "
-                     "ontology_nodes.attrs)")
+                     "ON CONFLICT (collection_id, uri) DO UPDATE SET kind = excluded.kind,"
+                     " attrs = COALESCE(excluded.attrs, ontology_nodes.attrs)")
         if not replace:
             self._rename_legacy_related()
         self._insert("INSERT INTO ontology_edges(collection_id, subject_uri, predicate, object_uri, predicate_uri,"
@@ -325,36 +366,70 @@ class PgGraph:
                      "ON CONFLICT (collection_id, subject_uri, predicate, object_uri, source_type, source_id)"
                      " DO NOTHING")
         if not replace:
-            self._drop_superseded(ontology)
-        self.write_vocabulary(ontology.concepts.object_properties)
+            self._drop_superseded(ontology, known_uris)
+        self.write_schema(ontology.concepts)
         if ontology.enriched_chunks:
             self.mark_enriched(ontology.enriched_chunks)
         return {"nodes": len(nodes), "edges": len(edges), "node_chunks": len(chunks), "edge_sources": len(sources)}
 
-    def write_vocabulary(self, object_properties) -> int:
-        """Keep the relation vocabulary: an object property named as a vocabulary name, with its
-        definition, as an ``ObjectProperty`` row of ``ontology_schema`` (where the product keeps
-        it, so the next build, the product's or the library's, uses the same names). A name
-        already there gets a definition it lacks; nothing is removed. Returns rows added."""
-        rows = {}
-        for op in object_properties or []:
-            name = vocab_name(op.name)
-            if name and name not in rows:
-                rows[name] = (op.description or "", op.domain or None, op.range or None)
+    def write_schema(self, concepts) -> int:
+        """Keep the schema where the product keeps it, in ``ontology_schema``: every class (its
+        description, parent and, for a class built from a table, ``source='csv'``, which the
+        product's dedupe reads as a deterministic identity), every object property (the relation
+        vocabulary with its definitions, and the table and document relation names) and every
+        datatype property with its range. So the next build, the product's or the library's,
+        sees the same schema. A row already there gets a description or source it lacks;
+        nothing is removed. Returns rows added."""
+        C = self.collection_id
+        parent_of = {child: parent for parent, child in concepts.class_hierarchy
+                     if parent and child and parent != child}
+        rows: dict[tuple[str, str], tuple] = {}
+        for cl in concepts.classes:
+            if cl.name and ("Class", cl.name) not in rows:
+                rows[("Class", cl.name)] = (cl.description or "", None, None, cl.parent or parent_of.get(cl.name),
+                                            "csv" if cl.source == "table" else None)
+        for op in concepts.object_properties:
+            if op.name and ("ObjectProperty", op.name) not in rows:
+                rows[("ObjectProperty", op.name)] = (op.description or "", op.domain or None, op.range or None,
+                                                     None, None)
+        for dp in concepts.datatype_properties:
+            if dp.name and ("DatatypeProperty", dp.name) not in rows:
+                rows[("DatatypeProperty", dp.name)] = ("", dp.domain or None, dp.range or "xsd:string", None, None)
         if not rows:
             return 0
-        C = self.collection_id
-        have = {r[0]: r[1] for r in self._q("SELECT element_name, description FROM ontology_schema"
-                                            " WHERE collection_id=? AND element_type='ObjectProperty'", (C,))}
-        new = [(C, n, "ObjectProperty", d, dom, rng) for n, (d, dom, rng) in rows.items() if n not in have]
+        have = {(t, n): (d, s) for n, t, d, s in self._q(
+            "SELECT element_name, element_type, description, source FROM ontology_schema WHERE collection_id=?", (C,))}
+        new = [(C, n, t, d, dom, rng, par, src) for (t, n), (d, dom, rng, par, src) in rows.items()
+               if (t, n) not in have]
         if new:
             self._insert("INSERT INTO ontology_schema(collection_id, element_name, element_type, description,"
-                         " domain_class, range_value)", 6, new, "")
-        for n, (d, _dom, _rng) in rows.items():
-            if n in have and d and not have[n]:
-                self._x("UPDATE ontology_schema SET description=? WHERE collection_id=? AND"
-                        " element_type='ObjectProperty' AND element_name=?", (d, C, n))
+                         " domain_class, range_value, parent_class, source)", 8, new, "")
+        for (t, n), (d, _dom, _rng, _par, src) in rows.items():
+            if (t, n) not in have:
+                continue
+            had_desc, had_src = have[(t, n)]
+            if d and not had_desc:
+                self._x("UPDATE ontology_schema SET description=? WHERE collection_id=? AND element_type=?"
+                        " AND element_name=?", (d, C, t, n))
+            if src and not had_src:
+                self._x("UPDATE ontology_schema SET source=? WHERE collection_id=? AND element_type=?"
+                        " AND element_name=?", (src, C, t, n))
         return len(new)
+
+    def write_vocabulary(self, object_properties) -> int:
+        """The relation vocabulary alone, as ``ObjectProperty`` rows (:meth:`write_schema` writes it
+        with the rest of the schema). Returns rows added."""
+        return self.write_schema(Concepts(object_properties=[op for op in (object_properties or []) if op.name]))
+
+    def label_uris(self) -> dict[tuple[str, str], str]:
+        """The stored nodes' URIs by ``(kind, label)``, concepts and instances (the first row when
+        two share a kind and label): what :func:`graph_rows` keeps on an appending write."""
+        out: dict[tuple[str, str], str] = {}
+        for u, k, lb in self._q("SELECT uri, kind, label FROM ontology_nodes WHERE collection_id=?"
+                                " AND kind IN ('concept', 'instance') ORDER BY id", (self.collection_id,)):
+            if lb and (k, lb) not in out:
+                out[(k, lb)] = u
+        return out
 
     def _rename_legacy_related(self) -> None:
         """Links stored under the former neighbour name take the current one (a duplicate goes first)."""
@@ -368,17 +443,18 @@ class PgGraph:
                 " AND edge_kind='objectProperty'",
                 (DEFAULT_RELATED_PREDICATE, DOMAIN_NS + DEFAULT_RELATED_PREDICATE, C, LEGACY_RELATED_PREDICATE))
 
-    def _drop_superseded(self, ontology) -> None:
+    def _drop_superseded(self, ontology, uris: dict | None = None) -> None:
         """On an incremental write: a stored relatedTo between two nodes the model links with a named
         relation was superseded; it leaves with its sources (the model no longer holds it)."""
         held = {(r.subject, r.object) for r in ontology.relations if r.predicate == DEFAULT_RELATED_PREDICATE}
-        _n, edges, _c = graph_rows(ontology)
+        _n, edges, _c = graph_rows(ontology, uris=uris)
         named = sorted({(su, ou) for su, p, ou, _pu, ek, _w, _lb in edges
                         if ek == "objectProperty" and p != DEFAULT_RELATED_PREDICATE})
         if not named:
             return
-        label_of = {class_uri(cl.name): cl.name for cl in ontology.concepts.classes if cl.name}
-        label_of.update({instance_uri(i.name): i.name for i in ontology.instances if i.name})
+        cu, iu = _uri_fns(ontology, uris)
+        label_of = {cu(cl.name): cl.name for cl in ontology.concepts.classes if cl.name}
+        label_of.update({iu(i.name): i.name for i in ontology.instances if i.name})
         C = self.collection_id
         for su, ou in named:
             for a, b in ((su, ou), (ou, su)):
@@ -613,10 +689,29 @@ class PgGraph:
                 if prop not in declared_dp:
                     concepts.datatype_properties.append(DataProperty(name=prop))
                     declared_dp.add(prop)
+        # the rest of the schema rows: a class built from a table keeps its deterministic identity
+        # (source csv / db) and its description; a datatype property its range
+        cls_rows = {n: (d, s) for n, d, s in self._q("SELECT element_name, description, source FROM ontology_schema"
+                                                     " WHERE collection_id=? AND element_type='Class' ORDER BY id",
+                                                     (C,))}
+        for cl in concepts.classes:
+            desc, src = cls_rows.get(cl.name, ("", None))
+            if src in ("csv", "db"):
+                cl.source = "table"
+            cl.description = cl.description or (desc or "")
+        ranges = {n: r for n, r in self._q("SELECT element_name, range_value FROM ontology_schema"
+                                           " WHERE collection_id=? AND element_type='DatatypeProperty' ORDER BY id",
+                                           (C,)) if r}
+        for dp in concepts.datatype_properties:
+            dp.range = ranges.get(dp.name, dp.range)
         all_chunks = sorted({cid for cids in chunks_of.values() for cid in cids})
+        uris = {}
+        for u in label:
+            if kind[u] in ("concept", "instance") and label[u] and (kind[u], label[u]) not in uris:
+                uris[(kind[u], label[u])] = u
         onto = Ontology(concepts=concepts, instances=instances, relations=relations, data_values=data_values,
                         chunks=[Chunk(id=cid, text="") for cid in all_chunks],
-                        enriched_chunks=sorted(self.enriched_chunk_ids()))
+                        enriched_chunks=sorted(self.enriched_chunk_ids()), uris=uris)
         return onto
 
     # ── GraphStore protocol (search) ──

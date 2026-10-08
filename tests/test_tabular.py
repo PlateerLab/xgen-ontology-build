@@ -74,3 +74,82 @@ def test_numbers_alone_do_not_make_a_foreign_key():
         "visits.csv": "no,place\n1,Seoul\n2,Busan\n3,Jeju",
     }))
     assert schema["fk_relations"] == []
+
+
+# ── 0.14: the rows of a database table, with the schema declared (develop build_from_table_rows) ──
+
+from datetime import datetime  # noqa: E402
+
+import pytest  # noqa: E402
+
+from xgen_ontology import (  # noqa: E402
+    OntologyBuilder,
+    build_from_db_rows,
+    build_from_rows,
+    normalize_fk_relations,
+)
+
+_ROWS = [
+    {"id": 1, "name": "Red", "hex": "#f00", "active": True, "since": datetime(2020, 1, 1, 9, 0),
+     "group_id": 7, "meta": {"a": 1}},
+    {"id": 2, "name": "Blue", "hex": None, "active": False, "since": None, "group_id": None, "meta": None},
+    {"id": 3, "name": "Green", "hex": "", "active": True, "since": None, "group_id": "", "meta": None},
+]
+_FK = [{"from_column": "group_id", "to_table": "color_groups", "to_column": "id", "to_pk_column": "id"}]
+
+
+def test_database_rows_build_from_the_declared_schema_and_python_types():
+    c, i, r, dv = build_from_rows("colors", list(_ROWS[0]), _ROWS, source_id="db1:colors", pk_candidates=["id"],
+                                  label_column="name", fk_relations=_FK)
+    assert [x.name for x in i] == ["Red", "Blue", "Green"]
+    assert [x.source_chunks for x in i] == [["db1:colors:1"], ["db1:colors:2"], ["db1:colors:3"]]  # a row is its own source
+    types = {d.name: d.range for d in c.datatype_properties}
+    assert types == {"id": "xsd:integer", "name": "xsd:string", "hex": "xsd:string", "active": "xsd:boolean",
+                     "since": "xsd:dateTime", "meta": "xsd:string"}            # the FK column is no attribute
+    vals = {(d.entity, d.property): d.value for d in dv}
+    assert vals[("Red", "active")] == "true" and vals[("Red", "since")] == "2020-01-01T09:00:00"
+    assert vals[("Red", "meta")] == '{"a": 1}' and ("Blue", "hex") not in vals   # NULL is not recorded
+    rel = {(x.subject, x.predicate, x.object) for x in r}
+    assert ("Red", "Colors_group_id", "color_groups_7") in rel
+    assert not any(s == "Blue" for s, _p, _o in rel)                            # a NULL key points nowhere
+    assert ("Green", "Colors_group_id", "color_groups_") in rel                  # an empty string still points
+    assert any(op.name == "Colors_group_id" and op.range == "ColorGroups" for op in c.object_properties)
+
+
+def test_a_declared_foreign_key_is_checked():
+    with pytest.raises(ValueError, match="lacks"):
+        normalize_fk_relations([{"from_column": "group_id"}], "colors", ["id", "group_id"])
+    with pytest.raises(ValueError, match="not a column"):
+        normalize_fk_relations([{**_FK[0], "from_column": "nope"}], "colors", ["id", "group_id"])
+    with pytest.raises(ValueError, match="primary key"):
+        normalize_fk_relations([{**_FK[0], "to_column": "name"}], "colors", ["id", "group_id"])
+    assert normalize_fk_relations(_FK, "colors", ["id", "group_id"])[0]["from_table"] == "colors"
+
+
+def test_rows_without_a_key_are_numbered_and_types_can_be_declared():
+    c, i, _r, _dv = build_from_rows("t", ["code", "name"], [{"code": "A", "name": "Alpha"}, {"code": "B", "name": "Beta"}],
+                                    source_id="db:t", column_types={"code": "xsd:string", "name": "xsd:string"})
+    assert [x.source_chunks for x in i] == [["db:t:row0"], ["db:t:row1"]]
+    assert {d.range for d in c.datatype_properties} == {"xsd:string"}
+
+
+def _colors(onto):
+    return {i.name for i in onto.instances if i.class_name == "Colors"}
+
+
+def test_the_builder_loads_rows_and_replaces_a_row_loaded_before():
+    builder = OntologyBuilder(chunk=False)
+    onto = builder.build_rows("colors", list(_ROWS[0]), _ROWS, source_id="db1:colors", pk_candidates=["id"],
+                              label_column="name", fk_relations=_FK)
+    assert _colors(onto) == {"Red", "Blue", "Green"} and onto.report.llm_calls == 0
+    assert sorted(c.id for c in onto.chunks) == ["db1:colors:1", "db1:colors:2", "db1:colors:3"]
+    assert "hex: #f00" in next(c.text for c in onto.chunks if c.id == "db1:colors:1")
+    changed = [{**_ROWS[0], "hex": "#ff0000"}]
+    builder.extend_rows(onto, "colors", list(_ROWS[0]), changed, source_id="db1:colors", pk_candidates=["id"],
+                        label_column="name", fk_relations=_FK)
+    hexes = sorted(d.value for d in onto.data_values if d.entity == "Red" and d.property == "hex")
+    assert hexes == ["#ff0000"] and len(onto.chunks) == 3                  # replaced, not added next to the old
+    builder.retract(onto, ["db1:colors:2"])
+    assert _colors(onto) == {"Red", "Green"}                               # a row that left the table leaves
+    assert _colors(build_from_db_rows("colors", list(_ROWS[0]), _ROWS, source_id="x", pk_candidates=["id"],
+                                      label_column="name")) == {"Red", "Blue", "Green"}

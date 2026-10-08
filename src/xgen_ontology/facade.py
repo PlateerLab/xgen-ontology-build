@@ -3,6 +3,7 @@
 * ``build_from_documents(docs)`` — zero-LLM structural extraction + cleaning -> Ontology
   (``mode="enrich"`` / ``"llm"`` with an ``llm`` for relation enrichment / full LLM extraction).
 * ``build_from_csv(tables)`` — deterministic table -> Ontology (no LLM).
+* ``build_from_db_rows(table, columns, rows)`` — one database table's rows -> Ontology (no LLM).
 * ``build_from_triples(triples)`` — searchable ontology from loose (s, p, o).
 """
 from __future__ import annotations
@@ -61,14 +62,16 @@ def build_from_files(paths: list[str], llm=None, **kwargs) -> Ontology:
 
 
 def build_from_csv(tables: dict[str, str], *, embedder=None, dedup: bool = True,
-                   hierarchy: bool = True) -> Ontology:
+                   hierarchy: bool = True, header_patterns=()) -> Ontology:
     """Build deterministically from CSV content. ``tables`` maps a (file) name to its
-    CSV text; names without a table extension get ``.csv`` appended."""
+    CSV text; names without a table extension get ``.csv`` appended. ``header_patterns``
+    strips ingestion preambles before a sheet marker is read."""
     docs = {}
     for name, content in tables.items():
         key = name if _has_table_ext(name) else f"{name}.csv"
         docs[key] = content
-    return OntologyBuilder(None, embedder=embedder, dedup=dedup, hierarchy=hierarchy).build(docs)
+    return OntologyBuilder(None, embedder=embedder, dedup=dedup, hierarchy=hierarchy,
+                           header_patterns=header_patterns).build(docs)
 
 
 def build_from_csv_files(paths: list[str], *, embedder=None, dedup: bool = True) -> Ontology:
@@ -78,6 +81,19 @@ def build_from_csv_files(paths: list[str], *, embedder=None, dedup: bool = True)
         with open(p, encoding="utf-8-sig") as f:
             tables[os.path.basename(p)] = f.read()
     return build_from_csv(tables, embedder=embedder, dedup=dedup)
+
+
+def build_from_db_rows(table_name: str, columns: list[str], rows: list[dict], *, source_id: str,
+                       embedder=None, dedup: bool = True, hierarchy: bool = True, **schema) -> Ontology:
+    """Build deterministically from the rows of one database table (a SELECT result).
+
+    ``schema`` declares what the data cannot tell: ``pk_candidates``, ``label_column``,
+    ``column_types``, ``fk_relations`` (see
+    :func:`~xgen_ontology.build.tabular.build_from_rows`). Each row is its own source,
+    ``"{source_id}:{pk}"``. Add more tables or reload rows with
+    :meth:`OntologyBuilder.extend_rows <xgen_ontology.OntologyBuilder.extend_rows>`."""
+    return OntologyBuilder(None, embedder=embedder, dedup=dedup, hierarchy=hierarchy).build_rows(
+        table_name, columns, rows, source_id=source_id, **schema)
 
 
 def build_from_triples(triples, chunks=None) -> Ontology:
@@ -99,4 +115,4 @@ def rows_to_csv(rows: list[dict], *, columns: list[str] | None = None) -> str:
 
 def _has_table_ext(name: str) -> bool:
     i = name.rfind(".")
-    return i >= 0 and name[i:].lower() in {".csv", ".tsv", ".xlsx", ".xls"}
+    return i >= 0 and name[i:].lower() in {".csv", ".tsv", ".xlsx", ".xlsm", ".xls"}

@@ -78,19 +78,22 @@ class Deduplicator:
 
         return merged
 
-    def compute_rename_map(self, concepts: Concepts) -> dict[str, str]:
+    def compute_rename_map(self, concepts: Concepts, *, max_classes: int = 500) -> dict[str, str]:
         """Class synonym map only, nothing applied.
 
         The same LLM pass as :meth:`deduplicate`, flattened (``a->b, b->c`` becomes
         ``a->c``) with self-maps removed. Used by the enrich build, which folds
-        synonyms after the base build rather than during it. Relation names are not
-        merged here: they are English identifiers held to a vocabulary by relation
-        formation (:func:`~xgen_ontology.build.relation_formation.canonicalize_predicates`). A
+        synonyms after the base build rather than during it. At most ``max_classes``
+        classes (the first declared) go to the model, as the production build sends at
+        most that many schema rows: one prompt over tens of thousands of classes is no
+        judgement. Relation names are not merged here: they are English identifiers held
+        to a vocabulary by relation formation
+        (:func:`~xgen_ontology.build.relation_formation.canonicalize_predicates`). A
         "keep the original-language name" rule over relation names folded the English
         vocabulary back into document words.
         """
         rename: dict[str, str] = {}
-        classes = [c for c in concepts.classes if c.name]
+        classes = [c for c in concepts.classes if c.name][:max(0, int(max_classes))]
         if len(classes) >= 3:
             rename.update(self._llm_synonyms(
                 [f"- {c.name}: {c.description}" for c in classes],

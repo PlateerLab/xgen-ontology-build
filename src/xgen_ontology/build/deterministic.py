@@ -79,6 +79,15 @@ def strip_headers(text: str, patterns=()) -> str:
     return t
 
 
+# The retrieval preamble the XGEN document service writes at the top of every chunk it stores
+# (the collection and file line, then the keyword line), which the production build strips
+# before it reads a chunk. Pass it as ``header_patterns`` when the chunks come from that
+# service; the library strips nothing by itself.
+XGEN_UPLOAD_HEADER_RE = re.compile(
+    r"\A\s*이는 '[^\n']*' 콜렉션에 존재하는 [^\n]* 파일의 내용입니다\.[ \t\r]*\n"
+    r"(?:(?:[^\n]*\n){0,2}?\{'keywords':[^\n]*\}[ \t\r]*\n)?")
+
+
 def _clean(s: str) -> str:
     return normalize_text(html.unescape(_TAG.sub("", s or "")))
 
