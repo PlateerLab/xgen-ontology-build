@@ -1,7 +1,7 @@
-from xgen_ontology import normalize_predicate, resolve_entities
-from xgen_ontology.build.dedup import Deduplicator, cluster_by_cosine
-from xgen_ontology.build.govern import govern_predicates
-from xgen_ontology.models import Concepts, Instance, ObjectProperty, Relation
+from xgen_ontology_build import normalize_predicate, resolve_entities
+from xgen_ontology_build.models import Concepts, Instance, ObjectProperty, Relation
+from xgen_ontology_build.postbuild.dedup import Deduplicator, cluster_by_cosine
+from xgen_ontology_build.postbuild.govern import govern_predicates
 
 
 def test_resolve_entities_merges_case_and_guards_numbers():

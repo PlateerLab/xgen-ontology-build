@@ -1,7 +1,7 @@
 import json
 
-from xgen_ontology import CallableLLM, build_from_documents
-from xgen_ontology.build.extract import DocumentExtractor
+from xgen_ontology_build import CallableLLM, build_from_documents
+from xgen_ontology_build.extract.llm_extract import DocumentExtractor
 
 _EXTRACTION = {
     "classes": [{"name": "Regulation", "description": "a rule"},
@@ -45,5 +45,3 @@ def test_pipeline_text_plus_table():
     names = {c.name for c in onto.concepts.classes}
     assert "Regulation" in names and "Colors" in names      # text + table merged
     assert onto.report.llm_calls >= 1
-    r = onto.search("which regulation applies to Acme Bank", llm=CallableLLM(_stub))
-    assert isinstance(r.answer, str)

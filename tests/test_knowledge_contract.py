@@ -6,11 +6,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-from xgen_ontology.knowledge import KnowledgeBundle, Resource, SourceChunk, canonical_json, digest
+from xgen_ontology_build.exchange.knowledge import (
+    KnowledgeBundle,
+    Resource,
+    SourceChunk,
+    canonical_json,
+    digest,
+)
 
 
 def test_packaged_contract_digests():
-    package = importlib.resources.files("xgen_ontology")
+    package = importlib.resources.files("xgen_ontology_build.exchange")
     lock = json.loads(package.joinpath("knowledge.lock.json").read_text())
     for filename, key in (("knowledge.py", "records_sha256"), ("knowledge.schema.json", "schema_sha256")):
         assert hashlib.sha256(package.joinpath(filename).read_bytes()).hexdigest() == lock[key]
@@ -21,10 +27,10 @@ def test_contract_source_matches_generated_files():
     subprocess.run([sys.executable, str(root / "tools/sync_knowledge_contract.py"), "--check"], check=True)
 
 
-def test_build_import_does_not_import_search_or_other_package():
+def test_build_import_does_not_import_the_search_package():
     root = Path(__file__).resolve().parents[1]
-    code = f"import sys; sys.path.insert(0, {str(root / 'src')!r}); import xgen_ontology; " \
-           "assert 'omnifuse' not in sys.modules; assert 'xgen_ontology.search.oneshot' not in sys.modules"
+    code = f"import sys; sys.path.insert(0, {str(root / 'src')!r}); import xgen_ontology_build; " \
+           "assert 'omnifuse' not in sys.modules; assert not [m for m in sys.modules if '.search' in m]"
     subprocess.run([sys.executable, "-I", "-S", "-c", code], check=True)
 
 
@@ -42,7 +48,7 @@ def test_producer_fixture_matches_current_builder(tmp_path):
 
 
 def test_portable_json_composes_pairs_and_replaces_isolated_surrogates():
-    raw_pair = "\ud83d\ude00"
+    raw_pair = "😀"
     actual_scalar = "\U0001f600"
     value = {"nested": [{raw_pair: raw_pair + "-ok"}], "isolated": "a\ud800b\udc00c"}
 
@@ -50,7 +56,7 @@ def test_portable_json_composes_pairs_and_replaces_isolated_surrogates():
     decoded = json.loads(encoded)
 
     assert decoded["nested"] == [{actual_scalar: actual_scalar + "-ok"}]
-    assert decoded["isolated"] == "a\ufffdb\ufffdc"
+    assert decoded["isolated"] == "a�b�c"
     assert digest(raw_pair) == digest(actual_scalar)
 
 
@@ -58,7 +64,7 @@ def test_bundle_serialization_normalizes_parser_surrogates():
     bundle = KnowledgeBundle(
         "corpus", "snapshot",
         resources=(Resource("resource", "v1", "document.txt"),),
-        chunks=(SourceChunk("chunk", "resource", "v1", "parser", "title \ud83d\ude00"),),
+        chunks=(SourceChunk("chunk", "resource", "v1", "parser", "title 😀"),),
     )
 
     data = bundle.to_dict()

@@ -1,6 +1,6 @@
 import json
 
-from xgen_ontology import (
+from xgen_ontology_build import (
     CallableLLM,
     build_from_files,
     build_from_text,

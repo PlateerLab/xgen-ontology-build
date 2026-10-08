@@ -1,7 +1,7 @@
 """The XGEN graph-table adapter, driven through sqlite (same SQL, ``?`` placeholders), and the progress callback."""
 import sqlite3
 
-from xgen_ontology import GraphRAG, InMemoryVector, Ontology, OntologyBuilder, PgGraph, graph_rows
+from xgen_ontology_build import Ontology, OntologyBuilder, PgGraph, graph_rows
 
 _T1 = """<table>
 <tr><td>기관명</td><td>담당부서</td><td>예산</td></tr>
@@ -65,9 +65,6 @@ def test_write_load_roundtrip_and_search_protocol():
     labels = pg.entity_labels()
     assert labels[0] == "기관명" and "한국마사회" in labels and "relatedTo" in pg.predicates()   # best-connected first
 
-    # and the one-shot search runs on it end to end (EchoLLM: the fused evidence comes back)
-    res = GraphRAG(pg, InMemoryVector(onto.chunks), None).search("한국마사회 담당부서")
-    assert any("말산업연구소" in r for r in res.relations)
 
 
 def test_incremental_build_on_a_stored_graph():
@@ -107,7 +104,7 @@ def test_progress_callback_reports_each_stage():
 
 
 def test_label_weight_and_sources_make_the_round_trip():
-    from xgen_ontology.models import Instance, Relation
+    from xgen_ontology_build.models import Instance, Relation
 
     pg = _pg()
     onto = Ontology(instances=[Instance("한국마사회", source_chunks=["c1", "c2"]),
@@ -121,8 +118,8 @@ def test_label_weight_and_sources_make_the_round_trip():
 
 
 def test_incremental_write_supersedes_and_renames_the_old_neighbour_link():
-    from xgen_ontology.backends.postgres import DOMAIN_NS, instance_uri
-    from xgen_ontology.models import Instance, Relation
+    from xgen_ontology_build.models import Instance, Relation
+    from xgen_ontology_build.store.postgres import DOMAIN_NS, instance_uri
 
     pg = _pg()
     a, b = instance_uri("A"), instance_uri("B")
@@ -143,8 +140,8 @@ def test_incremental_write_supersedes_and_renames_the_old_neighbour_link():
 
 
 def test_the_relation_vocabulary_is_kept_in_the_schema_table():
-    from xgen_ontology import vocabulary_of
-    from xgen_ontology.models import Concepts, ObjectProperty
+    from xgen_ontology_build import vocabulary_of
+    from xgen_ontology_build.models import Concepts, ObjectProperty
 
     pg = _pg()
     onto = Ontology(concepts=Concepts(object_properties=[
@@ -167,7 +164,7 @@ def test_the_relation_vocabulary_is_kept_in_the_schema_table():
 
 
 def test_a_stored_node_keeps_its_uri_across_load_extend_and_append():
-    from xgen_ontology.models import Class, Concepts, Instance
+    from xgen_ontology_build.models import Class, Concepts, Instance
 
     pg = _pg()
     # a node the product stored under a URI the name would not give now (a promoted head)
@@ -190,7 +187,7 @@ def test_a_stored_node_keeps_its_uri_across_load_extend_and_append():
 
 
 def test_a_head_promoted_to_a_class_keeps_the_instance_uri_and_changes_kind():
-    from xgen_ontology.models import Class, Concepts, Instance
+    from xgen_ontology_build.models import Class, Concepts, Instance
 
     pg = _pg()
     pg.write(Ontology(instances=[Instance(name="감사실", source_chunks=["c1"])]))
@@ -201,7 +198,7 @@ def test_a_head_promoted_to_a_class_keeps_the_instance_uri_and_changes_kind():
 
 
 def test_the_whole_schema_is_kept_in_the_schema_table():
-    from xgen_ontology import build_from_csv
+    from xgen_ontology_build import build_from_csv
 
     pg = _pg()
     onto = build_from_csv({"colors": "color_id,name,price\n10,Red,1.5\n20,Blue,2.0"})

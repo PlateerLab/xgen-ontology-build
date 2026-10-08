@@ -1,3 +1,54 @@
+# 0.15.0 (2026-10-08)
+
+The repository has been named for the build since 0.4 (`xgen-ontology-build`) while the
+package and the distribution kept the toolkit name (`xgen_ontology`, `xgen-ontology`) and
+the toolkit shape: build functions in one flat folder next to a search half that
+xgen-omnifuse had already replaced. This release makes the package read as what it is.
+
+## Renamed and laid out by stage
+
+- The import name is **`xgen_ontology_build`** and the distribution **`xgen-ontology-build`**.
+  The package is laid out by build stage, in the production build's order:
+  `text/` (what every stage shares: Korean name shapes, tokens and IRIs, chunking, file
+  parsing, the term dictionary, IRI translation), `extract/` (stage 1: deterministic
+  extraction, tables and database rows, relation units and relation formation, full LLM
+  extraction as `llm_extract`), `postbuild/` (stage 2: taxonomy, dedup, hierarchy, the
+  store-loading rules `finalize`, governance, resolution, quality, communities, retract),
+  `store/` (stage 3: PostgreSQL, SPARQL, the in-memory sink), `exchange/` (knowledge/v1,
+  RDF emit), with `pipeline.py` (`OntologyBuilder`) and `facade.py` at the top. Every
+  public name of 0.14 is still exported from the package root; module paths moved:
+  `xgen_ontology.build.deterministic` is `xgen_ontology_build.extract.deterministic`,
+  `xgen_ontology.backends.postgres` is `xgen_ontology_build.store.postgres`,
+  `xgen_ontology.knowledge` is `xgen_ontology_build.exchange.knowledge`, `xgen_ontology.korean`
+  is `xgen_ontology_build.text.korean`, and so on (the full map is in the compatibility
+  package). Intra-package imports are absolute.
+- **The search half is gone**: `GraphRAG`, `Ontology.search` / `graph` / `vector`,
+  `InMemoryGraph`, `InMemoryVector`, `BM25`, `SearchResult`, `VectorStore`. A build is
+  searched by exporting it (`export_knowledge`) to xgen-omnifuse, which owns search.
+  `PgGraph` keeps its read methods (the `GraphStore` protocol), `InMemoryGraphSink` stays
+  for tests and dry runs.
+- The knowledge/v1 contract is unchanged (byte-identical `exchange/knowledge.py`, same
+  lock), and bundles keep their extension key `xgen_ontology.build`, so consumers of
+  the contract need no change.
+
+## Compatibility
+
+- `compat/xgen-ontology` publishes **`xgen-ontology` 0.15.0** as a shim: it depends on
+  `xgen-ontology-build==0.15.0` and re-exports it under the old name, aliasing the old
+  module paths (`xgen_ontology.knowledge`, `xgen_ontology.build.*`, `xgen_ontology.backends.*`,
+  `xgen_ontology.korean` ...) with a `DeprecationWarning`. It is published with 0.15 and
+  0.16 and then stops. `pip install xgen-ontology` keeps working until then; the search
+  names are not in the shim.
+
+## Repository
+
+- `mirror.yml`: a push to main or a release tag on PlateerLab/xgen-ontology-build is
+  pushed on to the mirror jinsoo96/js-ontology-build at once, with a deploy key that can
+  write only that repository; the mirror's own scheduled sync drops from every 15 minutes
+  to once a day as a safety net.
+- CI and Publish build both distributions; `tools/sync_knowledge_contract.py` writes the
+  contract copy into `src/xgen_ontology_build/exchange`.
+
 # 0.14.0 (2026-10-08)
 
 A second pass over the production build (xgen-documents, develop 58429bd), area by area:

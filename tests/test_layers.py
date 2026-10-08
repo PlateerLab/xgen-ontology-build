@@ -2,15 +2,15 @@
 concepts (a generic head is not a type), taxonomy (Hearst reads the sentence, not a quoted title)."""
 import pytest
 
-from xgen_ontology.build.deterministic import parse_row_dump
-from xgen_ontology.build.taxonomy import (
+from xgen_ontology_build.extract.deterministic import parse_row_dump
+from xgen_ontology_build.postbuild.taxonomy import (
     _MORPH_CACHE,
     DEFAULT_RELATED_PREDICATE,
     _morph_starts,
     extract_hearst_pairs,
     induce_head_noun_hierarchy,
 )
-from xgen_ontology.korean import get_kiwi
+from xgen_ontology_build.text.korean import get_kiwi
 
 kiwi_required = pytest.mark.skipif(get_kiwi() is None, reason="needs kiwipiepy")
 

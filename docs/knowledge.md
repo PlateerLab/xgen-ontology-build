@@ -1,12 +1,12 @@
 # Independent graph building and knowledge/v1 exchange
 
-`xgen-ontology` builds graphs. The new `build_knowledge` API accepts explicit source
+`xgen-ontology-build` builds graphs. The new `build_knowledge` API accepts explicit source
 identities and returns portable data for any consumer, including `xgen-omnifuse`.
 It does not require or import OmniFuse, Xgen, a database or a server.
 
 ```python
-from xgen_ontology import build_knowledge
-from xgen_ontology.knowledge import KnowledgeBundle, Resource, SourceChunk
+from xgen_ontology_build import build_knowledge
+from xgen_ontology_build.exchange.knowledge import KnowledgeBundle, Resource, SourceChunk
 
 source = KnowledgeBundle(
     corpus_id="company", snapshot_id="source-v1",
@@ -106,7 +106,7 @@ A late build must never overwrite a newer source state. The OmniFuse reference
 provider supplies such a CAS operation for offline use; application databases must
 implement their own atomic publication and durable job handling.
 
-`OperationContext` from `xgen_ontology.knowledge` supplies cancellation/deadline checks.
+`OperationContext` from `xgen_ontology_build.exchange.knowledge` supplies cancellation/deadline checks.
 The new entry point checks before/after each pipeline stage without swallowing
 cancellation as a progress callback error. It copies the supplied builder's settings
 rather than attaching mutable callbacks to the caller's builder. A blocking external

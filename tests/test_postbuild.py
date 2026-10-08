@@ -4,7 +4,7 @@ import re
 
 import pytest
 
-from xgen_ontology import (
+from xgen_ontology_build import (
     CallableLLM,
     Deduplicator,
     build_from_csv,
@@ -19,8 +19,8 @@ from xgen_ontology import (
     strip_argument_noun,
     vote_relation_direction,
 )
-from xgen_ontology.korean import get_kiwi
-from xgen_ontology.models import Class, Concepts, DataProperty, Instance, ObjectProperty, Relation
+from xgen_ontology_build.models import Class, Concepts, DataProperty, Instance, ObjectProperty, Relation
+from xgen_ontology_build.text.korean import get_kiwi
 
 kiwi_required = pytest.mark.skipif(get_kiwi() is None, reason="kiwipiepy not installed")
 
@@ -216,7 +216,6 @@ def test_basic_mode_builds_from_documents_with_zero_llm_calls():
     assert ("한국마사회", "relatedTo", "말산업연구소", "담당부서") in {
         (r.subject, r.predicate, r.object, r.label) for r in onto.relations}
     assert onto.report.quality["score"] > 0 and "class_count" in onto.report.quality
-    assert onto.search("한국마사회 예산").chunks       # searchable end to end, still no LLM
 
 
 def test_basic_mode_ignores_a_provided_llm():

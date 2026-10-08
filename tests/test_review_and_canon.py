@@ -1,6 +1,6 @@
 """0.14: the quality review's production counts, and canonicalization examples by weight."""
-from xgen_ontology import canonicalize_predicates, review_quality
-from xgen_ontology.models import Class, Concepts, Instance, ObjectProperty, Relation
+from xgen_ontology_build import canonicalize_predicates, review_quality
+from xgen_ontology_build.models import Class, Concepts, Instance, ObjectProperty, Relation
 
 
 def test_review_counts_orphan_classes_dangling_ends_and_stated_sources():

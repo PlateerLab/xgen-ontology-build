@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, "src")  # run from repo root without installing
 
-from xgen_ontology import build_from_csv  # noqa: E402
+from xgen_ontology_build import build_from_csv  # noqa: E402
 
 onto = build_from_csv({
     "products": "product_id,name,color_id\n1,Widget,10\n2,Gadget,20\n3,Gizmo,10",

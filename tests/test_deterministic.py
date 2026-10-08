@@ -3,8 +3,8 @@ import re
 
 import pytest
 
-from xgen_ontology.build import deterministic as dx
-from xgen_ontology.korean import get_kiwi
+from xgen_ontology_build.extract import deterministic as dx
+from xgen_ontology_build.text.korean import get_kiwi
 
 kiwi_required = pytest.mark.skipif(get_kiwi() is None, reason="kiwipiepy not installed")
 

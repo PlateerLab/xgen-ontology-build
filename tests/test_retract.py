@@ -1,8 +1,16 @@
 """Retraction: deleted chunks leave the graph as a delta, in memory and on the graph tables."""
 import sqlite3
 
-from xgen_ontology import Ontology, OntologyBuilder, PgGraph, removed_chunks, retract_chunks
-from xgen_ontology.models import Class, Concepts, DataProperty, DataValue, Instance, ObjectProperty, Relation
+from xgen_ontology_build import Ontology, OntologyBuilder, PgGraph, removed_chunks, retract_chunks
+from xgen_ontology_build.models import (
+    Class,
+    Concepts,
+    DataProperty,
+    DataValue,
+    Instance,
+    ObjectProperty,
+    Relation,
+)
 
 _T1 = """<table>
 <tr><td>기관명</td><td>담당부서</td><td>예산</td></tr>

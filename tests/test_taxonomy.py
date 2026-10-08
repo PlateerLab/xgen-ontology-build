@@ -1,14 +1,14 @@
 import pytest
 
-from xgen_ontology import build_from_documents
-from xgen_ontology.build.taxonomy import (
+from xgen_ontology_build import build_from_documents
+from xgen_ontology_build.postbuild.taxonomy import (
     extract_hearst_pairs,
     hearst_hierarchy,
     induce_head_noun_hierarchy,
     induce_hierarchy,
     prose_only,
 )
-from xgen_ontology.korean import clean_name, get_kiwi, is_sentence_like, strip_list_markers
+from xgen_ontology_build.text.korean import clean_name, get_kiwi, is_sentence_like, strip_list_markers
 
 kiwi_required = pytest.mark.skipif(get_kiwi() is None, reason="kiwipiepy not installed")
 
@@ -157,7 +157,7 @@ def test_induce_head_noun_hierarchy_rejects_prefix_modifiers():
 
 @kiwi_required
 def test_induce_hierarchy_mints_new_classes_from_hearst():
-    from xgen_ontology.models import Class, Concepts
+    from xgen_ontology_build.models import Class, Concepts
 
     concepts = Concepts(classes=[Class(name="혈액"), Class(name="모근")])
     counts = induce_hierarchy(concepts, texts=[_HEARST_TEXT, *_FILLER_TEXTS])

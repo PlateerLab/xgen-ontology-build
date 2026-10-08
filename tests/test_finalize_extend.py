@@ -1,7 +1,7 @@
 """Graph normalization, incremental builds, IRI translation, the term dictionary and communities."""
 import json
 
-from xgen_ontology import (
+from xgen_ontology_build import (
     CallableLLM,
     OntologyBuilder,
     TermDictionary,
@@ -10,8 +10,16 @@ from xgen_ontology import (
     translate_names,
     unbuilt_chunks,
 )
-from xgen_ontology.build.translate import english_local_name
-from xgen_ontology.models import Class, Concepts, DataProperty, DataValue, Instance, ObjectProperty, Relation
+from xgen_ontology_build.models import (
+    Class,
+    Concepts,
+    DataProperty,
+    DataValue,
+    Instance,
+    ObjectProperty,
+    Relation,
+)
+from xgen_ontology_build.text.translate import english_local_name
 
 # ───────────────────────── normalize_graph ─────────────────────────
 

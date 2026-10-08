@@ -1,5 +1,5 @@
-from xgen_ontology import InMemoryGraphSink, build_from_csv
-from xgen_ontology.backends.sparql import SparqlGraph, fuseki
+from xgen_ontology_build import InMemoryGraphSink, build_from_csv
+from xgen_ontology_build.store.sparql import SparqlGraph, fuseki
 
 
 def test_inmemory_sink_collects_turtle():
@@ -22,5 +22,5 @@ def test_sparql_graph_label_filter_terms():
     g = SparqlGraph("http://x/query", graph_uri="urn:g")
     assert g.graph_uri == "urn:g"
     # no network call — exercise the internal term extraction path via tokenize
-    from xgen_ontology.text import tokenize
+    from xgen_ontology_build.text.tokens import tokenize
     assert [t for t in tokenize("Red color") if len(t) >= 2]

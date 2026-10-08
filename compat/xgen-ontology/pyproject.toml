@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xgen-ontology"
+version = "0.15.0"
+description = "Former name of xgen-ontology-build: installs it and re-exports the old import name xgen_ontology. Goes away after 0.16; import xgen_ontology_build."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "jinsoo96", email = "wlstn010203@gmail.com" }]
+classifiers = [
+    "Development Status :: 7 - Inactive",
+    "Programming Language :: Python :: 3",
+    "License :: Other/Proprietary License",
+]
+dependencies = ["xgen-ontology-build==0.15.0"]
+
+[project.urls]
+Homepage = "https://github.com/PlateerLab/xgen-ontology-build"
+Repository = "https://github.com/PlateerLab/xgen-ontology-build"
+Changelog = "https://github.com/PlateerLab/xgen-ontology-build/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xgen_ontology"]

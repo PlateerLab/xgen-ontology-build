@@ -1,5 +1,5 @@
-from xgen_ontology import build_from_csv
-from xgen_ontology.build.tabular import analyze_tables
+from xgen_ontology_build import build_from_csv
+from xgen_ontology_build.extract.tabular import analyze_tables
 
 
 def _docs(csv_map):
@@ -42,7 +42,7 @@ def test_fact_table_kept_as_schema_only():
 
 # ── 0.13: sheets, spans, TSV, foreign-key evidence (develop table_text / csv_schema_analyzer) ──
 
-from xgen_ontology.build.tabular import table_cell_rows  # noqa: E402
+from xgen_ontology_build.extract.tabular import table_cell_rows  # noqa: E402
 
 
 def test_each_sheet_of_a_workbook_is_a_table():
@@ -82,7 +82,7 @@ from datetime import datetime  # noqa: E402
 
 import pytest  # noqa: E402
 
-from xgen_ontology import (  # noqa: E402
+from xgen_ontology_build import (  # noqa: E402
     OntologyBuilder,
     build_from_db_rows,
     build_from_rows,

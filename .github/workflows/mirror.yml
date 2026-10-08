@@ -1,0 +1,40 @@
+name: Mirror to js-ontology-build
+
+# PlateerLab/xgen-ontology-build is the origin; jinsoo96/js-ontology-build is its mirror. A push to
+# main or a release tag here is pushed on to the mirror at once, with a deploy key that can write
+# only that one repository (secret MIRROR_DEPLOY_KEY). The mirror's own scheduled sync
+# (sync-from-xgen-ontology-build.yml) stays as a daily safety net.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-to-js-ontology-build
+  cancel-in-progress: false
+
+jobs:
+  push-to-mirror:
+    if: github.repository == 'PlateerLab/xgen-ontology-build'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push main and the tags to the mirror
+        env:
+          MIRROR_DEPLOY_KEY: ${{ secrets.MIRROR_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$MIRROR_DEPLOY_KEY" > ~/.ssh/mirror
+          chmod 600 ~/.ssh/mirror
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/mirror -o IdentitiesOnly=yes"
+          git push git@github.com:jinsoo96/js-ontology-build.git refs/remotes/origin/main:refs/heads/main
+          git push git@github.com:jinsoo96/js-ontology-build.git --tags

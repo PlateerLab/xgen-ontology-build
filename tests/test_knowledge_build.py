@@ -3,14 +3,14 @@ from dataclasses import replace
 
 import pytest
 
-from xgen_ontology import (
+from xgen_ontology_build import (
     OntologyBuilder,
     assemble_resource_fragments,
     build_knowledge,
     build_resource_fragment,
     export_knowledge,
 )
-from xgen_ontology.knowledge import (
+from xgen_ontology_build.exchange.knowledge import (
     ContractError,
     KnowledgeBundle,
     OperationCancelled,

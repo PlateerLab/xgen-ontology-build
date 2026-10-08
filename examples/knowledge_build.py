@@ -1,8 +1,8 @@
 """Build-only example: python examples/knowledge_build.py /tmp/knowledge.json."""
 import sys
 
-from xgen_ontology import build_knowledge
-from xgen_ontology.knowledge import KnowledgeBundle, Resource, SourceChunk
+from xgen_ontology_build import build_knowledge
+from xgen_ontology_build.exchange.knowledge import KnowledgeBundle, Resource, SourceChunk
 
 source = KnowledgeBundle(
     corpus_id="example", snapshot_id="source-v1",

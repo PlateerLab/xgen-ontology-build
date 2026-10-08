@@ -68,7 +68,7 @@ def main():
     parser.add_argument("--consumer", type=pathlib.Path)
     args = parser.parse_args()
     data = artifacts()
-    targets = {ROOT / "src/xgen_ontology" / name: value for name, value in data.items()}
+    targets = {ROOT / "src/xgen_ontology_build/exchange" / name: value for name, value in data.items()}
     targets[CONTRACT / "schema.json"] = data["knowledge.schema.json"]
     targets[CONTRACT / "lock.json"] = data["knowledge.lock.json"]
     if args.consumer:

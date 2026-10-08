@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, "src")
 
-from xgen_ontology import build_from_documents  # noqa: E402
+from xgen_ontology_build import build_from_documents  # noqa: E402
 
 BUDGET = """예산 배정표
 <table>
@@ -41,10 +41,6 @@ print("instances        :", [(i.name, i.class_name) for i in onto.instances][:6]
 print("relations        :", [(r.subject, r.predicate, r.object) for r in onto.relations][:4])
 print("data values      :", [(d.entity, d.property, d.value) for d in onto.data_values][:4])
 print("quality          :", onto.report.quality["score"], onto.report.quality["warnings"])
-
-res = onto.search("한국마사회 예산")
-print("\nevidence chunks  :", [c.id for c in res.chunks])
-print("relations used   :", res.relations[:3])
 
 # mode="enrich" adds an LLM pass for relations between these entities, mode="llm" is full
 # LLM extraction: build_from_documents(docs, llm=CallableLLM(my_model), mode="enrich")

@@ -1,5 +1,10 @@
 """Term layer: what may stand as a name at all."""
-from xgen_ontology.build.deterministic import _acceptable, _phrase_pieces, _pipe_caption, looks_like_header
+from xgen_ontology_build.extract.deterministic import (
+    _acceptable,
+    _phrase_pieces,
+    _pipe_caption,
+    looks_like_header,
+)
 
 
 def test_a_name_needs_a_letter_and_short_latin_terms_are_names():
@@ -28,15 +33,15 @@ def test_pipe_table_caption_needs_a_name_shape():
 
 import pytest  # noqa: E402
 
-from xgen_ontology.build.deterministic import (  # noqa: E402
+from xgen_ontology_build.extract.deterministic import (  # noqa: E402
     _is_table_title,
     extract_chunk,
     parse_pipe_table,
     parse_row_dump,
     prose_only,
 )
-from xgen_ontology.build.taxonomy import extract_hearst_pairs  # noqa: E402
-from xgen_ontology.korean import get_kiwi, is_name_shape, normalize_label  # noqa: E402
+from xgen_ontology_build.postbuild.taxonomy import extract_hearst_pairs  # noqa: E402
+from xgen_ontology_build.text.korean import get_kiwi, is_name_shape, normalize_label  # noqa: E402
 
 kiwi_required = pytest.mark.skipif(get_kiwi() is None, reason="kiwipiepy not installed")
 
