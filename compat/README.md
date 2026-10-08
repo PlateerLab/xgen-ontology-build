@@ -1,4 +1,4 @@
-# xgen-ontology (compatibility package)
+# xgen-ontology (the former name, until 0.16)
 
 `xgen-ontology` was renamed **`xgen-ontology-build`** in 0.15 and its import name is now
 `xgen_ontology_build`, laid out by build stage (`text`, `extract`, `postbuild`, `store`,

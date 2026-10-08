@@ -23,7 +23,7 @@ xgen-omnifuse had already replaced. This release makes the package read as what 
   is `xgen_ontology_build.text.korean`, and so on (the full map is in the compatibility
   package). Intra-package imports are absolute.
 - **The search half is gone**: `GraphRAG`, `Ontology.search` / `graph` / `vector`,
-  `InMemoryGraph`, `InMemoryVector`, `BM25`, `SearchResult`, `VectorStore`. A build is
+  `InMemoryGraph`, `InMemoryVector`, `BM25`, `SearchResult`, `VectorStore`, `EchoLLM`. A build is
   searched by exporting it (`export_knowledge`) to xgen-omnifuse, which owns search.
   `PgGraph` keeps its read methods (the `GraphStore` protocol), `InMemoryGraphSink` stays
   for tests and dry runs.
@@ -33,7 +33,7 @@ xgen-omnifuse had already replaced. This release makes the package read as what 
 
 ## Compatibility
 
-- `compat/xgen-ontology` publishes **`xgen-ontology` 0.15.0** as a shim: it depends on
+- `compat/` publishes **`xgen-ontology` 0.15.0** as a shim: it depends on
   `xgen-ontology-build==0.15.0` and re-exports it under the old name, aliasing the old
   module paths (`xgen_ontology.knowledge`, `xgen_ontology.build.*`, `xgen_ontology.backends.*`,
   `xgen_ontology.korean` ...) with a `DeprecationWarning`. It is published with 0.15 and

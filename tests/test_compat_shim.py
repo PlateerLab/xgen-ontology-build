@@ -1,10 +1,10 @@
-"""The former import name keeps working through the compatibility package (compat/xgen-ontology)."""
+"""The former import name keeps working through the compatibility package (compat/)."""
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SHIM = ROOT / "compat/xgen-ontology/src"
+SHIM = ROOT / "compat"
 
 
 def _run(code: str) -> str:

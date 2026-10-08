@@ -195,7 +195,7 @@ pip install "xgen-ontology-build[postgres]"     # + psycopg (PgGraph takes any D
 
 `xgen-ontology` is the former name. Until 0.16 it is published as a shim that installs this
 package and re-exports it under `xgen_ontology` (old module paths aliased, with a
-`DeprecationWarning`); see [compat/xgen-ontology](compat/xgen-ontology).
+`DeprecationWarning`); see [compat/](compat).
 
 Run the demos with no install:
 
@@ -228,7 +228,7 @@ python examples/knowledge_build.py out.json
 src/xgen_ontology_build/
   models.py        # Class/Property/Concepts (T-Box), Instance/Relation/DataValue (A-Box), Node/Chunk
   protocols.py     # LLM / GraphStore / GraphSink / Morphology / Embedder
-  llm.py           # EchoLLM / CallableLLM, the lenient JSON reader, invoke_json_meta
+  llm.py           # CallableLLM, the lenient JSON reader, invoke_json_meta
   ontology.py      # Ontology — one build's result: schema, individuals, relations, values, chunks, uris
   pipeline.py      # OntologyBuilder — the stages in the production order; build / extend / retract / rows
   facade.py        # build_from_csv / build_from_documents / build_from_db_rows / build_from_triples
@@ -237,7 +237,7 @@ src/xgen_ontology_build/
   postbuild/       # taxonomy · dedup · hierarchy · finalize · govern · resolve · retract · quality · community
   store/           # postgres (PgGraph) · sparql (SparqlGraph) · memory (InMemoryGraphSink)
   exchange/        # knowledge (the v1 contract) · knowledge_build · emit (Turtle / OWL)
-compat/xgen-ontology/   # the former name, re-exporting this package (until 0.16)
+compat/                 # the former name xgen_ontology, re-exporting this package (until 0.16)
 contracts/knowledge/v1  # the exchange contract's source: records.py, schema.json, lock.json
 examples/  tests/  tools/
 ```

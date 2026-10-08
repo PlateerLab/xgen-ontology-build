@@ -1,10 +1,7 @@
 """LLM adapters + a lenient JSON helper.
 
-* ``EchoLLM`` — returns the fused evidence so the search pipeline runs end-to-end
-  with no API key; build stages that expect JSON simply get nothing back and
-  no-op (so the deterministic CSV path needs no LLM at all).
 * ``CallableLLM`` — wrap any ``f(prompt, system) -> str`` (your OpenAI / Anthropic /
-  vLLM call) and you have a drop-in LLM.
+  vLLM call) and you have a drop-in LLM. The deterministic build needs none.
 
 ``invoke_json`` accepts whatever shape a model wraps its JSON in — leading prose,
 code fences, comments, trailing commas, smart quotes, a top-level array, or a
@@ -18,13 +15,6 @@ import json
 import re
 from collections.abc import Callable
 from typing import Any
-
-
-class EchoLLM:
-    """No-op LLM: echoes the evidence. Lets the pipeline run with zero credentials."""
-
-    def generate(self, prompt: str, *, system: str = "", timeout: float | None = None) -> str:
-        return prompt
 
 
 class CallableLLM:

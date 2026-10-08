@@ -18,10 +18,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip build twine
-      - run: python -m build && python -m build compat/xgen-ontology
-      - run: twine check dist/* compat/xgen-ontology/dist/*
+      - run: python -m build && python -m build compat
+      - run: twine check dist/* compat/dist/*
       - name: Publish to PyPI
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: twine upload dist/* && twine upload compat/xgen-ontology/dist/*
+        run: twine upload dist/* && twine upload compat/dist/*

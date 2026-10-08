@@ -14,8 +14,8 @@ from xgen_ontology_build.models import Node
 
 @runtime_checkable
 class LLM(Protocol):
-    """A language model. ``generate`` is used for search synthesis; the build stages
-    additionally expect JSON back (parsed leniently from ``generate``'s output)."""
+    """A language model. The build stages expect JSON back from ``generate`` (parsed
+    leniently); an adapter may add ``generate_json_meta`` to report finish reasons and tokens."""
 
     def generate(self, prompt: str, *, system: str = "", timeout: float | None = None) -> str:
         ...

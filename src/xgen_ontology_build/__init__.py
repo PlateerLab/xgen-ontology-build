@@ -79,7 +79,7 @@ from .facade import (
     build_from_triples,
     rows_to_csv,
 )
-from .llm import CallableLLM, EchoLLM, invoke_json_meta
+from .llm import CallableLLM, invoke_json_meta
 from .models import (
     BuildReport,
     Chunk,
@@ -175,7 +175,7 @@ __all__ = [
     # store
     "PgGraph", "graph_rows", "edge_source_rows", "SparqlGraph", "fuseki", "InMemoryGraphSink",
     # llm
-    "EchoLLM", "CallableLLM", "invoke_json_meta",
+    "CallableLLM", "invoke_json_meta",
     # models and protocols
     "Class", "ObjectProperty", "DataProperty", "Concepts", "Instance", "Relation",
     "DataValue", "Node", "Chunk", "RDFTriple", "BuildReport",

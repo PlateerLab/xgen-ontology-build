@@ -20,5 +20,5 @@ jobs:
       - run: pip install -e ".[dev,rdf]"
       - run: ruff check src tests
       - run: pytest -q
-      - run: pip install build && python -m build && python -m build compat/xgen-ontology
-      - run: pip install twine && twine check dist/* compat/xgen-ontology/dist/*
+      - run: pip install build && python -m build && python -m build compat
+      - run: pip install twine && twine check dist/* compat/dist/*
