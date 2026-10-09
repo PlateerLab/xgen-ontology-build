@@ -1,3 +1,47 @@
+# 0.16.0 (2026-10-09)
+
+Database rows kept in step with their table. The production build (xgen-documents · xgen-workflow,
+2026-10-09) replaced the timestamp cursor it loaded tables with by a full read compared against
+row fingerprints, and fixed what the loader did with rows along the way; this release carries
+that into the library.
+
+## Rows are individuals by declaration
+
+- `Instance.identity`: a database row's identity, the production loader's key
+  (`row_identity_key(table_source_id, key_column, key_value)` → `dbrow_…`). `build_from_rows`
+  sets it for every keyed row and makes a placeholder individual, carrying the target row's
+  identity, for a foreign key that points at a row the load does not hold
+  (`related_table_source_id`). The post-build reconciles identities: a row loaded again or a
+  placeholder its row arrived for is the same individual, the row's name wins, and the
+  relations other rows hold to it follow (`extend_rows` renames before it retracts, so a renamed
+  row keeps its foreign keys).
+- `normalize_graph` keeps a row's relations and values whatever the shape of its label: a row
+  named by a numeric key (a collateral id, a card number) no longer loses its foreign keys and
+  attributes at the store-loading step. The production serializer had the same defect, hidden
+  until now by merge-on-write.
+- `PgGraph` writes a row under its identity (`IDENTITY_PREFIX`), the URI the product uses, and
+  `load()` gives the rows their identity back. On an appending write a row's attributes and
+  label are replaced, not merged: a value that became NULL leaves the node.
+
+## Synchronization
+
+- `extract/rowsync`: `mapping_signature`, `row_fingerprint`, `diff_rows(rows, columns, pk, known=,
+  signature=, complete=)` → `RowDiff` (added · changed · unchanged · missing · fingerprints ·
+  `summary()`). A full read in key order against the fingerprints of the last load tells new,
+  changed and unchanged rows and, when the read was complete, the rows that left the table. No
+  timestamp column: a value changed without its stamp, a stamp set back and a deletion are all
+  seen. The fingerprints are the application's to keep (the product keeps them in
+  `db_ontology_row_states`).
+- `OntologyBuilder.sync_rows(ontology, table, columns, rows, source_id=, fingerprints=, complete=,
+  **schema)`: the diff applied to the build models (`extend_rows` for new and changed rows,
+  `retract` for the missing ones). Returns the `RowDiff`.
+- `PgGraph.detach_chunks(chunk_ids, attr_keys=)`: the traces of rows about to be written again
+  leave the tables first (the relations those chunks stated, gone when no other chunk states
+  them; the attribute keys on nodes that are not rows). `PgGraph.remove_rows(chunk_ids)`: rows
+  that left the table (`detach_chunks` then `prune_chunks`).
+
+The old import name `xgen_ontology` (the `compat` package) follows to 0.16.0, its last release.
+
 # 0.15.0 (2026-10-08)
 
 The repository has been named for the build since 0.4 (`xgen-ontology-build`) while the

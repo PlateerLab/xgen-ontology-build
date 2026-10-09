@@ -1,4 +1,4 @@
-from xgen_ontology_build import build_from_csv
+from xgen_ontology_build import build_from_csv, row_identity_key
 from xgen_ontology_build.extract.tabular import analyze_tables
 
 
@@ -101,8 +101,14 @@ _FK = [{"from_column": "group_id", "to_table": "color_groups", "to_column": "id"
 def test_database_rows_build_from_the_declared_schema_and_python_types():
     c, i, r, dv = build_from_rows("colors", list(_ROWS[0]), _ROWS, source_id="db1:colors", pk_candidates=["id"],
                                   label_column="name", fk_relations=_FK)
-    assert [x.name for x in i] == ["Red", "Blue", "Green"]
-    assert [x.source_chunks for x in i] == [["db1:colors:1"], ["db1:colors:2"], ["db1:colors:3"]]  # a row is its own source
+    rows_ = [x for x in i if x.class_name]
+    assert [x.name for x in rows_] == ["Red", "Blue", "Green"]
+    assert [x.source_chunks for x in rows_] == [["db1:colors:1"], ["db1:colors:2"], ["db1:colors:3"]]  # a row is its own source
+    assert all(x.identity == row_identity_key("db1:colors", "id", x.source_chunks[0].rsplit(":", 1)[1]) for x in rows_)
+    # a key pointing at a row this load does not hold: a placeholder carrying that row's identity
+    holders = {x.name: x.identity for x in i if not x.class_name}
+    assert holders == {"color_groups_7": row_identity_key("db1:color_groups", "id", "7"),
+                       "color_groups_": row_identity_key("db1:color_groups", "id", "")}
     types = {d.name: d.range for d in c.datatype_properties}
     assert types == {"id": "xsd:integer", "name": "xsd:string", "hex": "xsd:string", "active": "xsd:boolean",
                      "since": "xsd:dateTime", "meta": "xsd:string"}            # the FK column is no attribute

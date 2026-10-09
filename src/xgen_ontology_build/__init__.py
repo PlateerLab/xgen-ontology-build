@@ -58,12 +58,15 @@ from .extract.relation_formation import (
     vocabulary_of,
 )
 from .extract.relation_units import Unit, build_units, find_mentions, relation_label, units_for_documents
+from .extract.rowsync import RowDiff, diff_rows, key_text, mapping_signature, row_fingerprint
 from .extract.tabular import (
     analyze_tables,
     build_from_rows,
     build_from_tables,
     normalize_fk_relations,
+    related_table_source_id,
     row_chunks,
+    row_identity_key,
     split_sheets,
     table_cell_rows,
     value_text,
@@ -131,7 +134,7 @@ from .postbuild.taxonomy import (
 )
 from .protocols import LLM, Embedder, GraphSink, GraphStore, Morphology
 from .store.memory import InMemoryGraphSink
-from .store.postgres import PgGraph, edge_source_rows, graph_rows
+from .store.postgres import IDENTITY_PREFIX, PgGraph, edge_source_rows, graph_rows
 from .store.sparql import SparqlGraph, fuseki
 from .text.chunk import chunk_document, chunk_text
 from .text.dictionary import Term, TermDictionary
@@ -140,7 +143,7 @@ from .text.parse import extract_text, html_to_text, load_documents
 from .text.tokens import safe_uri, tokenize
 from .text.translate import clean_korean_name, translate_names
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 
 __all__ = [
     # one-call entry points and the builder
@@ -157,7 +160,8 @@ __all__ = [
     "tokenize", "safe_uri",
     # extract
     "analyze_tables", "build_from_tables", "build_from_rows", "row_chunks", "normalize_fk_relations",
-    "value_text", "xsd_type_of", "split_sheets", "table_cell_rows",
+    "row_identity_key", "related_table_source_id", "value_text", "xsd_type_of", "split_sheets", "table_cell_rows",
+    "RowDiff", "diff_rows", "row_fingerprint", "mapping_signature", "key_text",
     "extract_deterministic", "extract_as_dicts", "extract_chunk", "is_value", "is_class_name", "is_common_word",
     "MAX_COVERAGE", "RELATED_PREDICATE", "XGEN_UPLOAD_HEADER_RE",
     "DocumentExtractor", "extraction_schema",
@@ -173,7 +177,7 @@ __all__ = [
     "normalize_graph", "GRAPH_VOCABULARY", "RESERVED_PREDICATE_NAMES", "canon_predicate", "is_entity_shape",
     "retract_chunks", "review_quality", "detect_communities", "louvain_communities",
     # store
-    "PgGraph", "graph_rows", "edge_source_rows", "SparqlGraph", "fuseki", "InMemoryGraphSink",
+    "PgGraph", "IDENTITY_PREFIX", "graph_rows", "edge_source_rows", "SparqlGraph", "fuseki", "InMemoryGraphSink",
     # llm
     "CallableLLM", "invoke_json_meta",
     # models and protocols

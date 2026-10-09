@@ -113,6 +113,14 @@ def instance_uri(name: str) -> str:
     return INSTANCE_NS + stable_local(normalize_label(name))
 
 
+#: the URI prefix of a database row: its identity (``Instance.identity``, the production loader's key)
+IDENTITY_PREFIX = INSTANCE_NS + "dbrow_"
+
+
+def _identity_of(uri: str) -> str:
+    return uri[len(INSTANCE_NS):] if uri.startswith(IDENTITY_PREFIX) else ""
+
+
 def _uri_fns(ontology, uris: dict | None = None):
     """URI makers for an ontology's nodes: a node the store already holds keeps its URI
     (``ontology.uris`` and ``uris``, ``(kind, label) -> uri``), a head promoted to a class keeps
@@ -122,6 +130,8 @@ def _uri_fns(ontology, uris: dict | None = None):
     if uris:
         known.update(uris)
     inst_names = {i.name for i in ontology.instances if i.name}
+    # a row's URI is its identity, whatever it is named now and whatever a store held it under
+    identity = {i.name: i.identity for i in ontology.instances if i.name and i.identity}
 
     def cu(name: str) -> str:
         u = known.get(("concept", name))
@@ -130,6 +140,9 @@ def _uri_fns(ontology, uris: dict | None = None):
         return u or class_uri(name)
 
     def iu(name: str) -> str:
+        ident = identity.get(name)
+        if ident:
+            return INSTANCE_NS + ident
         return known.get(("instance", name)) or instance_uri(name)
 
     return cu, iu
@@ -331,7 +344,10 @@ class PgGraph:
         the former neighbour name (``관련``) are renamed to the current one. A node the store
         already holds keeps its URI (``ontology.uris`` from :meth:`load`, and on an appending
         write the rows as they are now), so a name whose kind or spelling the build changed is
-        the same row, not a second one.
+        the same row, not a second one. A database row (URI under :data:`IDENTITY_PREFIX`) is
+        written as the table has it now: its attributes and label are replaced, not merged, so a
+        value that became NULL leaves the node. Its former relations are taken out by
+        :meth:`detach_chunks` before the write.
         """
         del translations
         known_uris = dict(getattr(ontology, "uris", None) or {})
@@ -340,12 +356,13 @@ class PgGraph:
         nodes, edges, chunks = graph_rows(ontology, uris=known_uris)
         sources = edge_source_rows(ontology, uris=known_uris)
         C = self.collection_id
+        is_row = {u for u, _k, _l, _a in nodes if u.startswith(IDENTITY_PREFIX)}
         if replace:
             self.clear()
             merged = {u: a for u, _k, _l, a in nodes if a}
         else:
             merged = {}
-            with_attrs = [u for u, _k, _l, a in nodes if a]
+            with_attrs = [u for u, _k, _l, a in nodes if a and u not in is_row]
             for i in range(0, len(with_attrs), 500):
                 part = with_attrs[i:i + 500]
                 rows = self._q("SELECT uri, attrs FROM ontology_nodes WHERE collection_id=? AND uri IN ("
@@ -353,16 +370,23 @@ class PgGraph:
                 for u, a in rows:
                     merged[u] = _attrs(a)
             for u, _k, _l, a in nodes:
-                if a:
+                if u in is_row:
+                    merged[u] = a or {}
+                elif a:
                     cur = merged.setdefault(u, {})
                     for k, vs in a.items():
                         have = cur.setdefault(k, [])
                         have.extend(v for v in vs if v not in have)
+        node_rows = [(C, u, k, lb, json.dumps(merged.get(u), ensure_ascii=False) if merged.get(u) else None)
+                     for u, k, lb, _a in nodes]
         self._insert("INSERT INTO ontology_nodes(collection_id, uri, kind, label, attrs)", 5,
-                     [(C, u, k, lb, json.dumps(merged.get(u), ensure_ascii=False) if merged.get(u) else None)
-                      for u, k, lb, _a in nodes],
+                     [r for r in node_rows if r[1] not in is_row],
                      "ON CONFLICT (collection_id, uri) DO UPDATE SET kind = excluded.kind,"
                      " attrs = COALESCE(excluded.attrs, ontology_nodes.attrs)")
+        self._insert("INSERT INTO ontology_nodes(collection_id, uri, kind, label, attrs)", 5,
+                     [r for r in node_rows if r[1] in is_row],
+                     "ON CONFLICT (collection_id, uri) DO UPDATE SET kind = excluded.kind,"
+                     " label = excluded.label, attrs = excluded.attrs")
         if not replace:
             self._rename_legacy_related()
         self._insert("INSERT INTO ontology_edges(collection_id, subject_uri, predicate, object_uri, predicate_uri,"
@@ -491,6 +515,66 @@ class PgGraph:
     def enriched_chunk_ids(self) -> set[str]:
         return {r[0] for r in self._q("SELECT chunk_id FROM ontology_enriched_chunks WHERE collection_id=?",
                                       (self.collection_id,))}
+
+    def detach_chunks(self, chunk_ids, *, attr_keys=()) -> dict:
+        """Take the traces of rows that are about to be written again out of the tables: the
+        relations those chunks stated (gone when no other chunk states them, kept with their
+        other sources otherwise) and, on the nodes linked to the chunks, the attribute keys in
+        ``attr_keys`` (a row's columns). The nodes and their links stay: :meth:`write` with
+        ``replace=False`` then puts the rows back as they are now. A row node keeps nothing from
+        the write anyway (its attributes are replaced); ``attr_keys`` is for nodes that are not
+        rows. Returns ``chunks / sources / edges / nodes`` counts. Several statements: one
+        transaction, or an autocommit connection (an interrupted call leaves nothing the next
+        one cannot redo)."""
+        ids = sorted({str(c) for c in (chunk_ids or []) if c})
+        keys = sorted({str(k) for k in (attr_keys or []) if k})
+        stats = {"chunks": len(ids), "sources": 0, "edges": 0, "nodes": 0}
+        if not ids:
+            return stats
+        C = self.collection_id
+        for i in range(0, len(ids), 500):
+            part = ids[i:i + 500]
+            ph = ",".join(["?"] * len(part))
+            triples = self._q("SELECT DISTINCT subject_uri, predicate, object_uri FROM ontology_edge_sources"
+                              f" WHERE collection_id=? AND source_type='chunk' AND source_id IN ({ph})", (C, *part))
+            stats["sources"] += self._x("DELETE FROM ontology_edge_sources WHERE collection_id=?"
+                                        f" AND source_type='chunk' AND source_id IN ({ph})", (C, *part))
+            for s, p, o in triples:
+                stats["edges"] += self._x(
+                    "DELETE FROM ontology_edges WHERE collection_id=? AND subject_uri=? AND predicate=? AND object_uri=?"
+                    " AND edge_kind='objectProperty' AND NOT EXISTS (SELECT 1 FROM ontology_edge_sources x"
+                    "   WHERE x.collection_id=ontology_edges.collection_id AND x.subject_uri=ontology_edges.subject_uri"
+                    "     AND x.predicate=ontology_edges.predicate AND x.object_uri=ontology_edges.object_uri)",
+                    (C, s, p, o))
+            if keys:
+                uris = [r[0] for r in self._q("SELECT DISTINCT uri FROM ontology_node_chunks"
+                                              f" WHERE collection_id=? AND chunk_id IN ({ph})", (C, *part))]
+                for j in range(0, len(uris), 500):
+                    upart = uris[j:j + 500]
+                    uph = ",".join(["?"] * len(upart))
+                    if self.dialect == "sqlite":
+                        paths = ",".join(["?"] * len(keys))
+                        stats["nodes"] += self._x(
+                            f"UPDATE ontology_nodes SET attrs = json_remove(attrs, {paths})"
+                            f" WHERE collection_id=? AND uri IN ({uph}) AND attrs IS NOT NULL",
+                            (*[f'$."{k}"' for k in keys], C, *upart))
+                    else:
+                        stats["nodes"] += self._x(
+                            "UPDATE ontology_nodes SET attrs = attrs - ?::text[]"
+                            f" WHERE collection_id=? AND uri IN ({uph}) AND attrs IS NOT NULL",
+                            (keys, C, *upart))
+        return stats
+
+    def remove_rows(self, chunk_ids, *, attr_keys=(), **prune) -> dict:
+        """Rows that left the table: their traces go (:meth:`detach_chunks`) and then their chunks
+        (:meth:`prune_chunks`), so a row node nothing else links to leaves with its relations,
+        while a node a document also links to stays with that evidence only. ``prune`` is passed
+        to :meth:`prune_chunks`. Returns the two counts dicts merged."""
+        out = self.detach_chunks(chunk_ids, attr_keys=attr_keys)
+        pruned = self.prune_chunks(chunk_ids, **prune)
+        for k, v in pruned.items():
+            out[k] = out.get(k, 0) + v if k != "chunks" else v
+        return out
 
     def prune_chunks(self, chunk_ids, *,
                      structural_predicates=(DEFAULT_RELATED_PREDICATE, LEGACY_RELATED_PREDICATE, "sameAs")) -> dict:
@@ -664,7 +748,7 @@ class PgGraph:
                 concepts.class_hierarchy.append((label.get(o, ""), label.get(s, "")))
             elif ek == "instanceOf":
                 instances.append(Instance(name=label.get(s, ""), class_name=label.get(o, ""),
-                                          source_chunks=chunks_of.get(s, [])))
+                                          source_chunks=chunks_of.get(s, []), identity=_identity_of(s)))
                 typed.add(s)
             elif ek == "objectProperty_schema":
                 concepts.object_properties.append(ObjectProperty(name=p, domain=label.get(s, ""), range=label.get(o, "")))
@@ -677,7 +761,7 @@ class PgGraph:
                                           label=lb or None, weight=float(w) if w is not None else 1.0))
         for u in label:
             if kind[u] == "instance" and u not in typed and label[u]:
-                instances.append(Instance(name=label[u], source_chunks=chunks_of.get(u, [])))
+                instances.append(Instance(name=label[u], source_chunks=chunks_of.get(u, []), identity=_identity_of(u)))
         # the relation vocabulary: names with their definitions
         declared_op = {op.name: op for op in concepts.object_properties}
         for name, desc, dom, rng in self._q("SELECT element_name, description, domain_class, range_value"

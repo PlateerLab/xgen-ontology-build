@@ -18,6 +18,7 @@ value's type comes from its Python type.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import re
 from collections import Counter, defaultdict
@@ -204,7 +205,8 @@ def build_from_rows(
              "label_column": label_column, "row_count_estimate": len(text_rows)}
     sources = {table_name: row_source_ids(source_id, text_rows, pks[0] if pks else None)}
     return _build_graph({table_name: table}, normalize_fk_relations(fk_relations, table_name, columns),
-                        {table_name: text_rows}, sources, skip_fact_tables=False, null_cells=null_cells)
+                        {table_name: text_rows}, sources, skip_fact_tables=False, null_cells=null_cells,
+                        identity_source_id=source_id)
 
 
 def normalize_fk_relations(fk_relations: list[dict] | None, table_name: str, columns: list[str]) -> list[dict]:
@@ -257,8 +259,15 @@ def _build_graph(
     *,
     skip_fact_tables: bool = True,
     null_cells: set | None = None,
+    identity_source_id: str | None = None,
 ) -> tuple[Concepts, list[Instance], list[Relation], list[DataValue]]:
-    """Table schemas + their text rows (with each row's source ids) -> ontology."""
+    """Table schemas + their text rows (with each row's source ids) -> ontology.
+
+    ``identity_source_id`` (database rows) gives every keyed row an identity
+    (:func:`row_identity_key`) and a foreign key that points at a row this load does not hold a
+    placeholder individual with the target row's identity, named ``"{table}_{key}"``: when that
+    row is loaded it is the same individual and takes its own name.
+    """
     table_class = {t.get("table_name", fn): _camel(t.get("table_name", fn)) for fn, t in tables.items()}
 
     classes = [
@@ -362,10 +371,15 @@ def _build_graph(
         fk_cols = {fc for fc, _, _ in fk_index.get(raw, [])}
         labels = table_labels[fn]
         src = row_sources.get(fn, [])
+        placeholders: dict[str, Instance] = {}
         for i, row in enumerate(rows):
             name = labels[i]
             chunk_ids = src[i] if i < len(src) else []
-            instances.append(Instance(name=name, class_name=cls_name, source_chunks=list(chunk_ids)))
+            identity = ""
+            if identity_source_id and pk_col and row.get(pk_col, "").strip():
+                identity = row_identity_key(identity_source_id, pk_col, row.get(pk_col, ""))
+            instances.append(Instance(name=name, class_name=cls_name, source_chunks=list(chunk_ids),
+                                      identity=identity))
 
             for col, val in row.items():
                 if not val or not val.strip() or col in (pk_col, label_col) or col in fk_cols:
@@ -388,9 +402,16 @@ def _build_graph(
                 to_cls = table_class.get(to_table, _camel(to_table))
                 prop = f"{cls_name}_{from_col}"
                 lookup = pk_lookup.get(to_table, {})
-                target = lookup.get(fk_raw) or lookup.get(fk_val) or f"{to_table}_{fk_val}"
+                target = lookup.get(fk_raw) or lookup.get(fk_val)
+                if target is None:
+                    target = f"{to_table}_{fk_val}"
+                    # the row the key points at is not in this load: a placeholder with its identity
+                    target_src = related_table_source_id(identity_source_id, raw, to_table) if identity_source_id else None
+                    if target_src and target not in placeholders:
+                        placeholders[target] = Instance(name=target, identity=row_identity_key(target_src, _to_col, fk_raw))
                 relations.append(Relation(subject=name, predicate=prop, object=target,
                                           predicate_type="ObjectProperty", source_chunks=list(chunk_ids)))
+        instances.extend(placeholders.values())
 
     return concepts, instances, relations, data_values
 
@@ -413,6 +434,25 @@ def _camel(name: str) -> str:
     if not name:
         return name
     return "".join(p.capitalize() for p in name.split("_") if p)
+
+
+def row_identity_key(table_source_id: str, key_column: str, key_value: str) -> str:
+    """A database row's identity, the production loader's key: a hash of the table's source id,
+    its key column and the row's key value (as text). Stable across loads, the same whatever the
+    row is named, and the local part of the row's URI in a store."""
+    payload = json.dumps(["xgen-db-row-v1", table_source_id, key_column, key_value],
+                         ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return "dbrow_" + hashlib.sha256(payload).hexdigest()
+
+
+def related_table_source_id(source_id: str, from_table: str, to_table: str) -> str | None:
+    """The source id of the table a foreign key points at, from the pointing table's: the same
+    prefix with the table name swapped (``"db1:orders"`` -> ``"db1:customers"``). None when the
+    source id does not end in the table name, so no identity can be derived."""
+    suffix = f":{from_table}"
+    if not source_id.endswith(suffix):
+        return None
+    return f"{source_id[:-len(suffix)]}:{to_table}"
 
 
 _MAX_LABEL_CHARS = 40       # names are short

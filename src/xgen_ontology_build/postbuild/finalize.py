@@ -94,7 +94,8 @@ def normalize_graph(concepts: Concepts, instances: list[Instance], relations: li
       subject into the object
     * a relation whose predicate is a declared datatype property, or whose object is
       a value, becomes a data value; a relation or data value whose subject is a
-      value is dropped
+      value is dropped. A database row (``Instance.identity``) is an individual whatever
+      its label's shape: a row named by a numeric key keeps its relations and values
     * a relation endpoint is an individual that exists, else a declared class, else a
       new individual when the name has an entity's shape (:func:`is_entity_shape`);
       otherwise the relation (or data value) is dropped. ``structural_predicates`` (the
@@ -130,6 +131,8 @@ def normalize_graph(concepts: Concepts, instances: list[Instance], relations: li
         r.subject, r.predicate, r.object = nm(r.subject), str(r.predicate or "").strip(), nm(r.object)
     for d in data_values:
         d.entity, d.property = nm(d.entity), str(d.property or "").strip()
+    # rows are individuals by declaration, not by the shape of their names
+    identities = {i.name for i in instances if getattr(i, "identity", "")}
 
     # ── classes: only class-shaped names survive ──
     kept: list[Class] = []
@@ -204,7 +207,7 @@ def normalize_graph(concepts: Concepts, instances: list[Instance], relations: li
         if not (r.subject and r.predicate and r.object):
             stats["dropped"] += 1
             continue
-        if is_value_like(r.subject):
+        if is_value_like(r.subject) and r.subject not in identities:
             stats["dropped"] += 1
             continue
         reserved = RESERVED_PREDICATES.get(r.predicate)
@@ -242,7 +245,7 @@ def normalize_graph(concepts: Concepts, instances: list[Instance], relations: li
         elif r.predicate in declared_obp and r.predicate not in declared_dtp:
             is_attr = False
         else:
-            is_attr = is_value_like(r.object)
+            is_attr = is_value_like(r.object) and r.object not in identities
         if is_attr:
             data_values.append(DataValue(entity=r.subject, property=r.predicate, value=r.object,
                                          source_chunks=list(r.source_chunks)))
@@ -286,7 +289,8 @@ def normalize_graph(concepts: Concepts, instances: list[Instance], relations: li
     seen_dv: set[tuple[str, str, str]] = set()
     kept_dv: list[DataValue] = []
     for d in data_values:
-        if not (d.entity and d.property) or d.value is None or is_value_like(d.entity):
+        if not (d.entity and d.property) or d.value is None or (
+                is_value_like(d.entity) and d.entity not in identities):
             stats["dropped"] += 1
             continue
         key = (d.entity, d.property, str(d.value))

@@ -68,6 +68,12 @@ class Instance:
     name: str
     class_name: str = ""
     source_chunks: list[str] = field(default_factory=list)
+    # A database row's identity: the key the production loader derives from the table's source
+    # id, its key column and the row's key value (``row_identity_key``). It names the row even
+    # when its label is a bare number, keeps it apart from a document entity spelled the same,
+    # makes a row loaded again the same individual, and is its URI in a store ("dbrow_…").
+    # Empty for anything that is not a row.
+    identity: str = ""
 
 
 @dataclass

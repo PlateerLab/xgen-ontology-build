@@ -232,17 +232,56 @@ class OntologyBuilder:
         Every row is a source of its own, ``"{source_id}:{pk}"``, kept as a chunk whose text is the
         row's ``column: value`` lines; a row loaded before is replaced (its traces are retracted
         first, so a changed attribute does not pile up next to the old one), and a row that left
-        the table is retracted with :meth:`retract` on its id. No LLM is called for rows. Returns
-        the same ``ontology``.
+        the table is retracted with :meth:`retract` on its id. A row is the same individual across
+        loads by its identity (:func:`~xgen_ontology_build.extract.tabular.row_identity_key`):
+        when its name changed, the relations other rows hold to it follow the new name, and a
+        placeholder an earlier foreign key made for it becomes the row. No LLM is called for rows.
+        Returns the same ``ontology``.
         """
         graph = build_from_rows(table_name, columns, rows, source_id=source_id, column_types=column_types,
                                 pk_candidates=pk_candidates, fk_relations=fk_relations, label_column=label_column)
         chunks = row_chunks(table_name, columns, rows, source_id=source_id, pk_candidates=pk_candidates)
         known = {c.id for c in ontology.chunks}
         again = [ch["chunk_id"] for ch in chunks if ch["chunk_id"] in known]
+        # a row loaded before under another name: rename it everywhere before its traces go, so
+        # the foreign keys of other rows keep pointing at it
+        names_now = {i.identity: i.name for i in graph[1] if i.identity and i.class_name}
+        rename = {i.name: names_now[i.identity] for i in ontology.instances
+                  if i.identity in names_now and i.name != names_now[i.identity]}
+        if rename:
+            Deduplicator._apply_instance(rename, ontology.instances, ontology.relations, ontology.data_values)
         if again:
             self._retract(ontology, again)
         return self._run(ontology, {source_id: chunks}, incremental=bool(known), rows_graph=graph)
+
+    def sync_rows(self, ontology, table_name: str, columns: list[str], rows: list[dict], *, source_id: str,
+                  fingerprints: dict[str, str] | None = None, complete: bool = True, **schema):
+        """Bring ``ontology`` up to date with the rows of one table as a full read of it finds them.
+
+        ``rows`` is the table read in key order, ``fingerprints`` what the last call returned
+        (``RowDiff.fingerprints``, kept by the application). Rows whose fingerprint is new or
+        changed are loaded again (:meth:`extend_rows`: a changed value replaces the old one, a
+        value that became NULL leaves, a foreign key that moved points at the new row), rows the
+        read did not meet are retracted (``complete``: the read reached the end of the table), and
+        rows whose fingerprint is unchanged are not touched. No timestamp column is needed: a
+        value that changed without its stamp, a stamp set back and a deleted row are all seen.
+        ``schema`` is :meth:`extend_rows`'s (``pk_candidates`` is required: the key tells rows
+        apart between reads; ``label_column``, ``fk_relations``, ``column_types``). Returns the
+        :class:`~xgen_ontology_build.extract.rowsync.RowDiff`; record its ``fingerprints`` for the
+        next read and read ``summary()`` for what happened.
+        """
+        from xgen_ontology_build.extract.rowsync import diff_rows, mapping_signature
+
+        pk = next((str(p) for p in (schema.get("pk_candidates") or []) if p), None)
+        if not pk:
+            raise ValueError("sync_rows needs pk_candidates: the key tells rows apart between reads")
+        signature = mapping_signature(columns, pk, schema.get("label_column"), schema.get("fk_relations"))
+        diff = diff_rows(rows, columns, pk, known=fingerprints, signature=signature, complete=complete)
+        if diff.to_load:
+            self.extend_rows(ontology, table_name, columns, diff.to_load, source_id=source_id, **schema)
+        if diff.missing:
+            self.retract(ontology, [f"{source_id}:{k}" for k in diff.missing])
+        return diff
 
     def _retract(self, onto, chunk_ids) -> dict:
         ids = {str(c) for c in (chunk_ids or []) if c}
@@ -308,6 +347,9 @@ class OntologyBuilder:
             instances += i
             relations += r
             data_values += dv
+            rename = _reconcile_identities(instances)
+            if rename:
+                Deduplicator._apply_instance(rename, instances, relations, data_values)
             protected |= {cl.name for cl in c.classes if cl.name} | {x.name for x in i if x.name}
 
         if text_docs and mode in ("basic", "enrich"):
@@ -509,6 +551,36 @@ def removed_chunks(ontology, documents: dict[str, list[dict]]) -> list[str]:
     What ``extend(..., retract_missing=True)`` would retract: the deleted documents' chunks."""
     present = {ch["chunk_id"] for chs in _normalize_documents(documents).values() for ch in chs}
     return sorted(c.id for c in ontology.chunks if c.id not in present)
+
+
+def _reconcile_identities(instances: list[Instance]) -> dict[str, str]:
+    """One individual per row identity. A row loaded again, or a placeholder a foreign key made
+    before the row itself arrived, is the same individual: the record that is the row (typed)
+    wins over a placeholder and a later row over an earlier one, the loser's chunks move to it,
+    and the loser's name is the winner's from now on (the rename to apply to the graph)."""
+    by_identity: dict[str, int] = {}
+    kept: list[Instance] = []
+    rename: dict[str, str] = {}
+    for inst in instances:
+        if not inst.identity:
+            kept.append(inst)
+            continue
+        at = by_identity.get(inst.identity)
+        if at is None:
+            by_identity[inst.identity] = len(kept)
+            kept.append(inst)
+            continue
+        have = kept[at]
+        winner, loser = (inst, have) if inst.class_name else (have, inst)
+        kept[at] = winner
+        for cid in loser.source_chunks:
+            if cid not in winner.source_chunks:
+                winner.source_chunks.append(cid)
+        winner.class_name = winner.class_name or loser.class_name
+        if loser.name != winner.name:
+            rename[loser.name] = winner.name
+    instances[:] = kept
+    return rename
 
 
 def _linked_names(concepts: Concepts, instances: list[Instance], relations: list[Relation]) -> set[str]:

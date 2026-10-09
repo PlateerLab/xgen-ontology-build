@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xgen-ontology-build"
-version = "0.15.0"
+version = "0.16.0"
 description = "The ontology build: documents and tables -> a clean knowledge graph with provenance, laid out by stage (extract, post-build, store, exchange). Zero infra, any graph DB; search is xgen-omnifuse's."
 readme = "README.md"
 requires-python = ">=3.10"

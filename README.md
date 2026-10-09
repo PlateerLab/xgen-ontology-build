@@ -126,6 +126,18 @@ builder.build_rows("colors", ["id", "name", "group_id"], rows, source_id="db1:co
 builder.extend_rows(onto, "colors", cols, changed_rows, source_id="db1:colors", pk_candidates=["id"])
 builder.retract(onto, ["db1:colors:2"])                        # a row that left the table
 
+# keep a table in step with the graph without a timestamp column: read it whole, in key order,
+# and compare every row's fingerprint with the one recorded at the last load. New and changed
+# rows are loaded again (a changed value replaces the old one, a NULLed value leaves, a moved
+# key points at the new row), rows the read did not meet are retracted, the rest is untouched.
+diff = builder.sync_rows(onto, "colors", cols, rows_now, source_id="db1:colors",
+                         fingerprints=last_fingerprints, pk_candidates=["id"], label_column="name")
+diff.summary()               # {"scanned": 12, "added": 1, "changed": 2, "unchanged": 8, "deleted": 1, ...}
+last_fingerprints = diff.fingerprints                          # keep these for the next read
+# a row is the same individual across loads by its identity (row_identity_key: the table's
+# source id, its key column and the key value), whatever it is named; a foreign key to a row
+# not loaded yet makes a placeholder that becomes the row when its table arrives
+
 # a term dictionary (acronym -> full form, house spelling -> official one) applies at
 # build time, at query time and at indexing time
 d = TermDictionary("finance")
@@ -169,6 +181,12 @@ pg.write(onto, replace=False)             # append; a node seen again merges its
                                           # ontology_schema gets classes, properties and the vocabulary
 pg.prune_chunks(deleted_chunk_ids)        # a deleted document, applied as a delta on the tables
                                           # (a relation goes with the last chunk that states it)
+
+# database rows live under their identity (IDENTITY_PREFIX + row_identity_key(...)), the URI the
+# product gives them. Written again they are replaced, not merged: take their traces out first
+pg.detach_chunks(["db1:colors:7"])        # the relations that row stated (kept if another chunk states them)
+pg.write(onto, replace=False)             # the row as it is now: attributes and label replaced
+pg.remove_rows(["db1:colors:2"])          # a row that left the table: detach, then prune its chunk
 ```
 
 Any SPARQL 1.1 store takes a build as Turtle:
