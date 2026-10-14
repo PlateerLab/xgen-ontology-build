@@ -1,3 +1,38 @@
+# 0.17.0 (2026-10-14)
+
+Parts built one document at a time, judged over the whole corpus. The file-storage build
+(xgen-documents) constructs a fragment per file revision and assembles the fragments by id; this
+release gives that assembly a post-build, so the judgements a single file's chunks are too few to
+make (a name that floods the corpus, two spellings of one key, the class hierarchy, the shared
+predicate vocabulary) are made once over the assembled graph, the way one build over the whole
+corpus makes them.
+
+## Assembly post-build
+
+- `OntologyBuilder.postprocess(ontology, *, doc_of=None, protected=())`: the post-build over an
+  existing graph with no new documents. Coverage flood is judged over every chunk of the graph
+  (names in `protected` are never dropped), then instance key merging, class synonyms and
+  hierarchy run by mode. The report notes the number of chunks it judged.
+- `import_knowledge(bundle) -> Ontology`: the inverse of `export_knowledge`. A knowledge/v1 bundle
+  comes back as an `Ontology` with its chunks, evidence and declared relations, so a bundle can
+  be post-built, extended or exported again. The round trip keeps ids, kinds, labels, assertions
+  and evidence; inferred facts come back without source chunks, as they were exported.
+- `table_bound_names(bundle) -> set[str]`: the instance names whose every evidence chunk belongs
+  to a table file (csv · tsv · xlsx …). Rows are individuals by declaration, so the post-build
+  leaves them alone whatever their coverage.
+- `assemble_resource_fragments(..., postprocess=OntologyBuilder(...))`: assembles as before, then
+  runs `postprocess` over the assembled graph with the table-bound names protected and exports it
+  again. `extensions["xgen_ontology.assembly"]` records `postprocessed` and `mode`, and
+  `extensions["xgen_ontology.build"]["report"]` is the post-build's report. Without the argument
+  nothing changes.
+
+## Vocabulary seed
+
+- `build_knowledge(..., vocabulary=[...])` · `build_resource_fragment(..., vocabulary=[...])`: in
+  `enrich` and `llm` mode the given predicate names are declared as object properties before the
+  build, so a fragment built after the rest of the corpus uses the corpus's predicates instead of
+  inventing a variant. `basic` ignores it (no predicates are named there).
+
 # 0.16.0 (2026-10-09)
 
 Database rows kept in step with their table. The production build (xgen-documents · xgen-workflow,

@@ -16,12 +16,18 @@ from xgen_ontology_build.exchange.knowledge import (
     canonical_json,
     stable_id,
 )
-from xgen_ontology_build.pipeline import OntologyBuilder
+from xgen_ontology_build.extract.tabular import TABLE_EXTENSIONS, _ext
+from xgen_ontology_build.models import Chunk, Class, Concepts, DataProperty, DataValue, Instance, ObjectProperty, Relation
+from xgen_ontology_build.ontology import Ontology
+from xgen_ontology_build.pipeline import OntologyBuilder, _declare_relations, _extend_chunks
+
+# The statements a graph makes about its own shape; everything else names a relation.
+_TYPING_PREDICATES = frozenset({"instanceOf", "subClassOf"})
 
 
 def build_knowledge(
     source: KnowledgeBundle | dict, *, snapshot_id: str, builder: OntologyBuilder | None = None,
-    context=None,
+    context=None, vocabulary=None,
 ) -> KnowledgeBundle:
     """Build a complete replacement graph for an immutable source snapshot.
 
@@ -29,6 +35,9 @@ def build_knowledge(
     source is handled by building its *complete current* corpus again; the legacy
     additive ``extend`` API is intentionally not used for retractions. Publication
     is the host's CAS transaction, not a side effect of this function.
+
+    ``vocabulary`` (relation names) seeds an ``enrich`` build: the names a corpus already
+    uses are offered to the model first, so parts built apart name a relation the same way.
     """
     source = KnowledgeBundle.from_dict(source.to_dict() if hasattr(source, "to_dict") else source)
     context = context or OperationContext()
@@ -54,15 +63,108 @@ def build_knowledge(
         suffix = PurePosixPath(name).suffix
         key = f"{stable_id('source', chunk.resource_id)}/{name}" if suffix else f"{chunk.resource_id}.txt"
         documents[key].append({"chunk_id": chunk.id, "chunk_text": chunk.text, "chunk_index": chunk.ordinal})
-    ontology = engine.build(dict(documents))
+    names = [n for n in dict.fromkeys(vocabulary or ()) if n]
+    if names and engine.mode == "enrich" and engine.llm is not None:
+        seeded = Ontology()
+        seeded.concepts.object_properties = [ObjectProperty(name=n) for n in names]
+        ontology = engine.extend(seeded, dict(documents))
+    else:
+        ontology = engine.build(dict(documents))
     if context is not None:
         context.check()
     return export_knowledge(ontology, source, snapshot_id=snapshot_id)
 
 
+def _document_key(resource) -> str:
+    """The document name a build runs a resource under (its stable id and name, so the extension
+    still routes tables)."""
+    suffix = PurePosixPath(resource.name).suffix
+    return f"{stable_id('source', resource.id)}/{resource.name}" if suffix else f"{resource.id}.txt"
+
+
+def table_bound_names(bundle: KnowledgeBundle | dict) -> set[str]:
+    """The names whose every piece of evidence is a table resource: the deterministic identities a
+    table gave them, which the post-build never renames away."""
+    bundle = KnowledgeBundle.from_dict(bundle.to_dict() if hasattr(bundle, "to_dict") else bundle)
+    tables = {r.id for r in bundle.resources if _ext(r.name) in TABLE_EXTENSIONS}
+    chunk_resource = {c.id: c.resource_id for c in bundle.chunks}
+    evidence_chunk = {e.id: e.chunk_id for e in bundle.evidence}
+    out: set[str] = set()
+    for entity in bundle.entities:
+        owners = {chunk_resource.get(evidence_chunk.get(eid)) for eid in entity.evidence_ids}
+        owners.discard(None)
+        if owners and owners <= tables:
+            out.add(entity.label)
+    return out
+
+
+def import_knowledge(bundle: KnowledgeBundle | dict) -> Ontology:
+    """Read a knowledge/v1 graph back into the build model.
+
+    The inverse of :func:`export_knowledge` as far as the contract carries: classes, instances
+    and their typing, the class hierarchy, relations and literal values with the chunks that
+    support them (an ``inferred`` statement borrowed its support, so it comes back without
+    chunks of its own, the way the post-build treats a derived relation). Chunk texts come
+    from the bundle's source chunks. The relation names and value properties are declared from
+    the facts that use them, so a store or a later build treats them as the build did.
+    """
+    bundle = KnowledgeBundle.from_dict(bundle.to_dict() if hasattr(bundle, "to_dict") else bundle)
+    resources = {r.id: r for r in bundle.resources}
+    evidence_chunk = {e.id: e.chunk_id for e in bundle.evidence}
+    entity = {e.id: e for e in bundle.entities}
+
+    def chunks_of(ids):
+        return sorted({evidence_chunk[i] for i in ids if i in evidence_chunk})
+
+    tables = table_bound_names(bundle)
+    concepts = Concepts()
+    for e in bundle.entities:
+        if e.kind == "class":
+            concepts.classes.append(Class(name=e.label, source_chunks=chunks_of(e.evidence_ids),
+                                          source="table" if e.label in tables else ""))
+    class_of: dict[str, str] = {}
+    for f in bundle.facts:
+        if f.predicate == "instanceOf" and f.object_id in entity:
+            class_of.setdefault(f.subject_id, entity[f.object_id].label)
+    instances = [Instance(name=e.label, class_name=class_of.get(e.id, ""), source_chunks=chunks_of(e.evidence_ids))
+                 for e in bundle.entities if e.kind == "instance"]
+    relations: list[Relation] = []
+    data_values: list[DataValue] = []
+    for f in bundle.facts:
+        subject = entity.get(f.subject_id)
+        if subject is None or f.predicate == "instanceOf":
+            continue
+        if f.predicate == "subClassOf":
+            parent = entity.get(f.object_id)
+            if parent is not None and (parent.label, subject.label) not in concepts.class_hierarchy:
+                concepts.class_hierarchy.append((parent.label, subject.label))
+            continue
+        ids = chunks_of(f.evidence_ids) if f.assertion != "inferred" else []
+        if f.object_id is not None:
+            obj = entity.get(f.object_id)
+            if obj is not None:
+                relations.append(Relation(subject=subject.label, predicate=f.predicate, object=obj.label,
+                                          source_chunks=ids))
+        else:
+            data_values.append(DataValue(entity=subject.label, property=f.predicate, value=f.literal,
+                                         value_type=f.datatype or "xsd:string", source_chunks=ids))
+    _declare_relations(concepts, [], relations)
+    known = {dp.name for dp in concepts.datatype_properties}
+    for v in data_values:
+        if v.property not in known:
+            concepts.datatype_properties.append(DataProperty(name=v.property))
+            known.add(v.property)
+    chunks = [Chunk(id=c.id, text=c.text, meta={"doc": _document_key(resources[c.resource_id])})
+              for c in sorted(bundle.chunks, key=lambda c: (c.resource_id, c.ordinal, c.id))
+              if c.resource_id in resources]
+    onto = Ontology(concepts=concepts, instances=instances, relations=relations, data_values=data_values)
+    onto.chunks = _extend_chunks(chunks, {}, instances)
+    return onto
+
+
 def build_resource_fragment(
     source: KnowledgeBundle | dict, *, snapshot_id: str, builder: OntologyBuilder | None = None,
-    context=None,
+    context=None, vocabulary=None,
 ) -> KnowledgeBundle:
     """Build the graph projection for one immutable resource revision.
 
@@ -84,7 +186,8 @@ def build_resource_fragment(
         embeddings=(),
         components=tuple(component for component in source.components if component != "embeddings"),
     )
-    built = build_knowledge(graph_source, snapshot_id=snapshot_id, builder=builder, context=context)
+    built = build_knowledge(graph_source, snapshot_id=snapshot_id, builder=builder, context=context,
+                            vocabulary=vocabulary)
     extensions = dict(built.extensions)
     extensions["xgen_ontology.fragment"] = {
         "resource_id": resource.id,
@@ -95,7 +198,7 @@ def build_resource_fragment(
 
 
 def assemble_resource_fragments(
-    source: KnowledgeBundle | dict, fragments, *, snapshot_id: str,
+    source: KnowledgeBundle | dict, fragments, *, snapshot_id: str, postprocess: OntologyBuilder | None = None,
 ) -> KnowledgeBundle:
     """Assemble current resource fragments into one deterministic graph snapshot.
 
@@ -103,6 +206,14 @@ def assemble_resource_fragments(
     only graph records.  Omitting a deleted or replaced resource's fragment is
     the retraction mechanism, so assembly never needs the deleted file bytes and
     never rebuilds unaffected resources.
+
+    With ``postprocess`` (a builder), the merged graph is read back into the build
+    model and that builder's post-build runs over it as one corpus
+    (:meth:`OntologyBuilder.postprocess`): the names a fragment could not judge
+    alone (a word that floods the corpus, a synonym spelled differently in another
+    file, a head noun shared across files, a relation named two ways) are judged
+    over the whole. Table-built names are protected. The result carries the
+    post-build report under ``xgen_ontology.build``.
     """
     source = KnowledgeBundle.from_dict(source.to_dict() if hasattr(source, "to_dict") else source)
     resources = {resource.id: resource for resource in source.resources}
@@ -167,7 +278,7 @@ def assemble_resource_fragments(
     }
     components = set(source.components)
     components.add("graph")
-    return replace(
+    assembled = replace(
         source,
         snapshot_id=snapshot_id,
         evidence=tuple(evidence[key] for key in sorted(evidence)),
@@ -176,6 +287,14 @@ def assemble_resource_fragments(
         components=tuple(sorted(components)),
         extensions=extensions,
     ).validate()
+    if postprocess is None:
+        return assembled
+    ontology = postprocess.postprocess(import_knowledge(assembled), protected=table_bound_names(assembled))
+    result = export_knowledge(ontology, source, snapshot_id=snapshot_id)
+    merged = dict(result.extensions)
+    merged["xgen_ontology.assembly"] = {**extensions["xgen_ontology.assembly"], "postprocessed": True,
+                                        "mode": ontology.report.mode}
+    return replace(result, extensions=merged).validate()
 
 
 def export_knowledge(ontology, source: KnowledgeBundle | dict, *, snapshot_id: str) -> KnowledgeBundle:

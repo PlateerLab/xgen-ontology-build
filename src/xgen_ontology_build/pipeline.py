@@ -217,6 +217,22 @@ class OntologyBuilder:
         self._retract(ontology, chunk_ids)
         return self._run(ontology, {}, incremental=True, doc_of=doc_of)
 
+    def postprocess(self, ontology, *, doc_of: dict[str, str] | None = None, protected=()):
+        """Re-run the post-build over ``ontology`` as one corpus, every name in scope.
+
+        Nothing is extracted and no relation pass runs. What runs is what a build decides over
+        its whole corpus: the coverage judgement (a name in more than ``max_coverage`` of the
+        chunks is not an entity), the merges (instance keys, name fragments, common words),
+        hierarchy induction, class synonyms (the model's in ``enrich`` mode, the embedder's when
+        given), and in ``enrich`` mode the relation-name canonicalization. A graph assembled from
+        parts built one document at a time (resource fragments) gets here the judgements each
+        part could not make alone. ``protected`` names are never renamed or dropped (a table's
+        deterministic identities; a row's identity is protected on its own). Returns the same
+        ``ontology`` with a fresh report.
+        """
+        return self._run(ontology, {}, incremental=True, doc_of=doc_of, reprocess=True,
+                         protected=set(protected))
+
     def build_rows(self, table_name: str, columns: list[str], rows: list[dict], *, source_id: str, **schema):
         """Build from the rows of one database table (a SELECT result); see :meth:`extend_rows`."""
         from xgen_ontology_build.ontology import Ontology  # local import (Ontology imports build.*)
@@ -300,7 +316,8 @@ class OntologyBuilder:
     # ── the pipeline ──
 
     def _run(self, onto, documents: dict[str, list[dict]], *, incremental: bool = False,
-             doc_of: dict[str, str] | None = None, rows_graph=None):
+             doc_of: dict[str, str] | None = None, rows_graph=None, reprocess: bool = False,
+             protected: set[str] | None = None):
         concepts, instances, relations, data_values = (onto.concepts, onto.instances,
                                                        onto.relations, onto.data_values)
         report = onto.report if incremental else BuildReport()
@@ -325,12 +342,14 @@ class OntologyBuilder:
             for ch in chs:
                 doc_of[ch["chunk_id"]] = name
         corpus_docs = len(set(doc_of.values()))
-        if incremental and not new_docs and mode != "enrich" and rows_graph is None:
+        if reprocess:
+            report.notes.append(f"post-build over {corpus_total} chunk(s) as one corpus")
+        elif incremental and not new_docs and mode != "enrich" and rows_graph is None:
             report.notes.append("no new chunks: nothing to extract")
 
         self._tick("start", mode=mode, incremental=incremental, new_chunks=sum(len(v) for v in new_docs.values()),
                    corpus_chunks=corpus_total)
-        protected: set[str] = set()   # table-built names: deterministic identities, never renamed away
+        protected = set(protected or ())   # table-built names: deterministic identities, never renamed away
         if table_docs:
             self._tick("tables", documents=len(table_docs))
             schema = analyze_tables(table_docs, header_patterns=self.header_patterns)
@@ -427,13 +446,19 @@ class OntologyBuilder:
         if self.resolve:
             resolve_entities(instances, relations, data_values)
 
+        if reprocess:
+            # The coverage judgement is made at extraction over its own corpus; a graph assembled from parts
+            # built one document at a time makes it here, over the whole.
+            report.pruned += _apply_coverage(instances, relations, data_values, corpus_total,
+                                             self.max_coverage, protected)
+        has_text = bool(text_docs) or reprocess
         deduper = Deduplicator(self.llm if mode == "enrich" else None, self.morphology, self.embedder)
         if self.dedup:
             self._tick("dedup", instances=len(instances), relations=len(relations))
             # Key merge is for extracted names, so it runs when text was extracted (the production
             # build's rule); a table row's label is its identity and is never merged away.
             rename = {o: n for o, n in deduper._normalize_instances(instances).items()
-                      if o not in protected} if text_docs else {}
+                      if o not in protected} if has_text else {}
             if rename:
                 Deduplicator._apply_instance(rename, instances, relations, data_values)
                 report.renamed += len(rename)
@@ -445,7 +470,7 @@ class OntologyBuilder:
             prose_texts = ([ch.get("chunk_text", "") for chs in text_docs.values() for ch in chs]
                            if mode == "llm" else None)   # basic/enrich ran Hearst during extraction
             new_names = None
-            if incremental:
+            if incremental and not reprocess:
                 new_names = ({c.name for c in concepts.classes} | {i.name for i in instances}) - before
             induced = induce_hierarchy(concepts, prose_texts, instances, relations,
                                        related_predicate=self.related_predicate,
@@ -461,7 +486,7 @@ class OntologyBuilder:
                     f"{induced['retyped']} typing(s) under too common a head made neighbour links")
             report.renamed += induced["renamed"]
 
-        if self.dedup and text_docs:
+        if self.dedup and has_text:
             # Class synonyms are judged when text was extracted (the production build's rule:
             # a table-only build has no synonyms to find). Names the model folds are not
             # offered to the vector pass again, so a name cannot be folded and be a cluster's
@@ -635,6 +660,26 @@ def _apply_fold(concepts: Concepts, instances: list[Instance], data_values: list
     concepts.classes = [c for c in concepts.classes if c.name not in fold]
     data_values[:] = [d for d in data_values if d.entity not in fold]
     return len(fold)
+
+
+def _apply_coverage(instances: list[Instance], relations: list[Relation], data_values: list[DataValue],
+                    corpus_chunks: int, max_coverage: float, protected: set[str]) -> int:
+    """Drop the names found in more than ``max_coverage`` of the corpus: the extractor's judgement
+    (``build_facts``), applied to a graph whose parts were extracted over smaller corpora. Off below
+    the extractor's minimum (``_COVERAGE_MIN_CHUNKS``); a name in one chunk is never a flood."""
+    from xgen_ontology_build.extract.deterministic import _COVERAGE_MIN_CHUNKS
+
+    if corpus_chunks < _COVERAGE_MIN_CHUNKS:
+        return 0
+    flood = {i.name for i in instances
+             if i.name and i.name not in protected and not i.identity and len(set(i.source_chunks)) > 1
+             and len(set(i.source_chunks)) / corpus_chunks > max_coverage}
+    if not flood:
+        return 0
+    instances[:] = [i for i in instances if i.name not in flood]
+    relations[:] = [r for r in relations if r.subject not in flood and r.object not in flood]
+    data_values[:] = [v for v in data_values if v.entity not in flood]
+    return len(flood)
 
 
 def _apply_prune(instances: list[Instance], relations: list[Relation], data_values: list[DataValue],

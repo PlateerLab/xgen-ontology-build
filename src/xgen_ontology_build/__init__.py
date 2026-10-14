@@ -31,6 +31,8 @@ same way: ``build_from_documents({"policy.md": text})`` needs no LLM either)::
 from .exchange.emit import to_owl_xml, to_rdf_triples, to_turtle
 from .exchange.knowledge_build import (
     assemble_resource_fragments,
+    import_knowledge,
+    table_bound_names,
     build_knowledge,
     build_resource_fragment,
     export_knowledge,
@@ -143,7 +145,7 @@ from .text.parse import extract_text, html_to_text, load_documents
 from .text.tokens import safe_uri, tokenize
 from .text.translate import clean_korean_name, translate_names
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 
 __all__ = [
     # one-call entry points and the builder
@@ -152,6 +154,7 @@ __all__ = [
     "Ontology", "unbuilt_chunks", "removed_chunks",
     # exchange: knowledge/v1 and RDF
     "build_knowledge", "export_knowledge", "build_resource_fragment", "assemble_resource_fragments",
+    "import_knowledge", "table_bound_names",
     "to_rdf_triples", "to_turtle", "to_owl_xml",
     # text
     "chunk_text", "chunk_document", "extract_text", "html_to_text", "load_documents",
