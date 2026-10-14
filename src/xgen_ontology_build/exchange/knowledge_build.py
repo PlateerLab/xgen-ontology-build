@@ -348,8 +348,10 @@ def export_knowledge(ontology, source: KnowledgeBundle | dict, *, snapshot_id: s
     def add(subject, predicate, obj=None, *, literal=None, datatype=None, ids=(), inferred=False):
         support = refs(ids)
         if not support:
-            # These are dependencies of a derived statement, not an exact quote.
-            support = supports[subject] | (supports[obj] if obj else set())
+            # A derived statement is evidenced where its subject is, not an exact quote. Taking the object's
+            # support too replicated a hub class's whole spread (thousands of chunks over a corpus) on every
+            # edge into it, and hid the edge whenever any one of those chunks was out of the reader's scope.
+            support = supports[subject] or (supports[obj] if obj else set())
             inferred = True
         if not support:
             diagnostics.append({"subject": subject[1], "predicate": predicate, "reason": "missing_support"})

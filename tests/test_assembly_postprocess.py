@@ -105,3 +105,24 @@ def test_enrich_fragment_is_seeded_with_the_corpus_vocabulary():
     assert declared[:2] == ["hasManager", "belongsTo"]
     plain = build_resource_fragment(part, snapshot_id="f2", builder=OntologyBuilder())
     assert "hasManager" not in [op["name"] for op in plain.extensions["xgen_ontology.build"]["schema"]["object_properties"]]
+
+
+def test_inferred_facts_carry_the_subject_evidence_not_the_hub():
+    """A derived edge into a hub class carries the subject's chunks only: the hub's whole spread is not
+    replicated on every edge (167 MiB over a 55-file corpus) and the edge stays visible when one hub chunk is out."""
+    from xgen_ontology_build.models import Class, Instance
+    from xgen_ontology_build.ontology import Ontology
+
+    chunks = tuple(SourceChunk(f"d:{n}", "d", "v1", "p", f"text {n}", ordinal=n) for n in range(40))
+    source = KnowledgeBundle("corp", "src", resources=(Resource("d", "v1", "d.txt"),), chunks=chunks)
+    onto = Ontology()
+    onto.concepts.classes += [Class(name="법률"), Class(name="특별법", parent="법률")]
+    onto.concepts.class_hierarchy.append(("법률", "특별법"))
+    onto.instances += [Instance(name=f"법률{n}", class_name="법률", source_chunks=[f"d:{n}"]) for n in range(39)]
+    onto.instances.append(Instance(name="특별법1", class_name="특별법", source_chunks=["d:39"]))
+    built = export_knowledge(onto, source, snapshot_id="x")
+    by_label = {e.label: e for e in built.entities}
+    edge = next(f for f in built.facts if f.predicate == "subClassOf")
+    assert edge.assertion == "inferred"
+    assert set(edge.evidence_ids) == set(by_label["특별법"].evidence_ids)
+    assert len(edge.evidence_ids) == 1 and len(by_label["법률"].evidence_ids) == 40   # the edge adds its chunk to both ends

@@ -26,6 +26,14 @@ corpus makes them.
   `extensions["xgen_ontology.build"]["report"]` is the post-build's report. Without the argument
   nothing changes.
 
+## Evidence of derived facts
+
+- `export_knowledge`: a fact derived without an exact quote (`subClassOf`, a neighbour link under a head too
+  common to classify, a typing without chunks) now carries the evidence of its subject only, falling back to
+  the object's when the subject has none. It used to carry both: over a corpus every edge into a hub class
+  replicated the hub's whole spread (a 55-file store exported 167 MiB of evidence ids), and the edge was
+  hidden whenever any one of those chunks was out of the reader's scope.
+
 ## Vocabulary seed
 
 - `build_knowledge(..., vocabulary=[...])` · `build_resource_fragment(..., vocabulary=[...])`: in
