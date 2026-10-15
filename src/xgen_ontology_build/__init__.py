@@ -31,11 +31,11 @@ same way: ``build_from_documents({"policy.md": text})`` needs no LLM either)::
 from .exchange.emit import to_owl_xml, to_rdf_triples, to_turtle
 from .exchange.knowledge_build import (
     assemble_resource_fragments,
-    import_knowledge,
-    table_bound_names,
     build_knowledge,
     build_resource_fragment,
     export_knowledge,
+    import_knowledge,
+    table_bound_names,
 )
 from .extract.deterministic import (
     MAX_COVERAGE,

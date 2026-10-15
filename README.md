@@ -211,9 +211,9 @@ pip install "xgen-ontology-build[vector]"       # + qdrant-client (embedding ada
 pip install "xgen-ontology-build[postgres]"     # + psycopg (PgGraph takes any DB-API connection)
 ```
 
-`xgen-ontology` is the former name. Until 0.16 it is published as a shim that installs this
-package and re-exports it under `xgen_ontology` (old module paths aliased, with a
-`DeprecationWarning`); see [compat/](compat).
+`xgen-ontology` is the former name. Its last release, 0.16.0, is a shim that installs
+xgen-ontology-build 0.16.0 and re-exports it under `xgen_ontology`; from 0.17 import
+`xgen_ontology_build`.
 
 Run the demos with no install:
 
@@ -255,7 +255,6 @@ src/xgen_ontology_build/
   postbuild/       # taxonomy · dedup · hierarchy · finalize · govern · resolve · retract · quality · community
   store/           # postgres (PgGraph) · sparql (SparqlGraph) · memory (InMemoryGraphSink)
   exchange/        # knowledge (the v1 contract) · knowledge_build · emit (Turtle / OWL)
-compat/                 # the former name xgen_ontology, re-exporting this package (until 0.16)
 contracts/knowledge/v1  # the exchange contract's source: records.py, schema.json, lock.json
 examples/  tests/  tools/
 ```

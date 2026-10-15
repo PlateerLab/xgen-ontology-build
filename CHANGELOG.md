@@ -7,6 +7,11 @@ make (a name that floods the corpus, two spellings of one key, the class hierarc
 predicate vocabulary) are made once over the assembled graph, the way one build over the whole
 corpus makes them.
 
+## Former name
+
+- The `compat` package (`xgen-ontology`, import name `xgen_ontology`) is no longer built or
+  published. Its last release stays 0.16.0; import `xgen_ontology_build`.
+
 ## Assembly post-build
 
 - `OntologyBuilder.postprocess(ontology, *, doc_of=None, protected=())`: the post-build over an

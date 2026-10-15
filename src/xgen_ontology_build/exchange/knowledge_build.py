@@ -17,7 +17,16 @@ from xgen_ontology_build.exchange.knowledge import (
     stable_id,
 )
 from xgen_ontology_build.extract.tabular import TABLE_EXTENSIONS, _ext
-from xgen_ontology_build.models import Chunk, Class, Concepts, DataProperty, DataValue, Instance, ObjectProperty, Relation
+from xgen_ontology_build.models import (
+    Chunk,
+    Class,
+    Concepts,
+    DataProperty,
+    DataValue,
+    Instance,
+    ObjectProperty,
+    Relation,
+)
 from xgen_ontology_build.ontology import Ontology
 from xgen_ontology_build.pipeline import OntologyBuilder, _declare_relations, _extend_chunks
 
