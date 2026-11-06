@@ -283,4 +283,4 @@ fast-forwards once a day and on manual dispatch as a safety net (it pushes with 
 
 ## License
 
-[MIT](LICENSE). Copyright (c) 2026 Jinsoo Kim.
+Apache License 2.0. See [LICENSE.md](LICENSE.md) for details.

@@ -8,8 +8,8 @@ version = "0.17.0"
 description = "The ontology build: documents and tables -> a clean knowledge graph with provenance, laid out by stage (extract, post-build, store, exchange). Zero infra, any graph DB; search is xgen-omnifuse's."
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE.md"]
 authors = [{ name = "jinsoo96", email = "wlstn010203@gmail.com" }]
 keywords = [
     "ontology", "knowledge-graph", "ontology-learning", "sparql", "postgresql",

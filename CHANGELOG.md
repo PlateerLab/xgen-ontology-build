@@ -1,7 +1,8 @@
 # Unreleased
 
-- License changed to MIT. The source-available license no longer applies to this repository
-  or to releases from here on; releases already published keep the license they shipped with.
+- License changed to Apache License 2.0. The source-available license no longer applies to this
+  repository or to releases from here on; releases already published keep the license they
+  shipped with.
 
 # 0.17.0 (2026-10-14)
 
