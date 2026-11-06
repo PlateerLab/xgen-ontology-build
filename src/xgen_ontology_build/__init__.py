@@ -145,7 +145,7 @@ from .text.parse import extract_text, html_to_text, load_documents
 from .text.tokens import safe_uri, tokenize
 from .text.translate import clean_korean_name, translate_names
 
-__version__ = "0.17.0"
+__version__ = "0.17.1"
 
 __all__ = [
     # one-call entry points and the builder

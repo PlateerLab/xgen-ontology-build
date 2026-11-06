@@ -1,4 +1,4 @@
-# Unreleased
+# 0.17.1 (2026-11-06)
 
 - License changed to Apache License 2.0. The source-available license no longer applies to this
   repository or to releases from here on; releases already published keep the license they
