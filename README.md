@@ -283,8 +283,4 @@ fast-forwards once a day and on manual dispatch as a safety net (it pushes with 
 
 ## License
 
-Source-available. Copyright (c) 2026 Jinsoo Kim.
-
-Members of the PlateerLab organization may use, modify and ship it as part of Plateer products
-(LICENSE §4). For anyone else, reading and citing are fine; any other use needs written
-permission. Releases 0.1.0 through 0.3.0 stay MIT for that specific code. See [`LICENSE`](LICENSE).
+[MIT](LICENSE). Copyright (c) 2026 Jinsoo Kim.
